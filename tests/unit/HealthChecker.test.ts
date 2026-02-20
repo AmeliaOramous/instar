@@ -3,6 +3,7 @@ import { HealthChecker } from '../../src/monitoring/HealthChecker.js';
 import { createTempProject, createMockSessionManager } from '../helpers/setup.js';
 import type { TempProject, MockSessionManager } from '../helpers/setup.js';
 import type { InstarConfig } from '../../src/core/types.js';
+import { detectTmuxPath } from '../../src/core/Config.js';
 
 describe('HealthChecker', () => {
   let project: TempProject;
@@ -15,7 +16,7 @@ describe('HealthChecker', () => {
     stateDir: '', // set in beforeEach
     port: 4040,
     sessions: {
-      tmuxPath: '/opt/homebrew/bin/tmux',
+      tmuxPath: detectTmuxPath() || '/usr/bin/tmux',
       claudePath: '/usr/bin/claude',
       projectDir: '/tmp/test',
       maxSessions: 3,

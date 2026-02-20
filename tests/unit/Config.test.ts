@@ -14,9 +14,12 @@ describe('Config', () => {
   describe('detectClaudePath', () => {
     it('finds Claude CLI on this system', () => {
       const claudePath = detectClaudePath();
-      // Claude CLI should be installed on the dev machine
-      expect(claudePath).toBeTruthy();
-      expect(claudePath).toContain('claude');
+      // Claude CLI may not be installed in CI — only assert format when found
+      if (claudePath) {
+        expect(claudePath).toContain('claude');
+      } else {
+        expect(claudePath).toBeNull();
+      }
     });
   });
 });
