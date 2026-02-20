@@ -190,9 +190,11 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   console.log(`  ${pc.green('✓')} Created CLAUDE.md`);
 
   // Write .gitignore
-  const gitignore = `# Instar runtime state
+  const gitignore = `# Instar runtime state (contains auth token, session data, relationships)
 .instar/state/
 .instar/logs/
+.instar/relationships/
+.instar/config.json
 
 # Node
 node_modules/
@@ -346,7 +348,7 @@ async function initExistingProject(options: InitOptions): Promise<void> {
 
   // Append to .gitignore
   const gitignorePath = path.join(projectDir, '.gitignore');
-  const agentKitIgnores = '\n# Instar runtime state\n.instar/state/\n.instar/logs/\n';
+  const agentKitIgnores = '\n# Instar runtime state (contains auth token, session data, relationships)\n.instar/state/\n.instar/logs/\n.instar/relationships/\n.instar/config.json\n';
   if (fs.existsSync(gitignorePath)) {
     const content = fs.readFileSync(gitignorePath, 'utf-8');
     if (!content.includes('.instar/')) {

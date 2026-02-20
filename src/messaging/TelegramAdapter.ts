@@ -199,28 +199,54 @@ export class TelegramAdapter implements MessagingAdapter {
   getTopicHistory(topicId: number, limit: number = 20): LogEntry[] {
     if (!fs.existsSync(this.messageLogPath)) return [];
 
-    const lines = fs.readFileSync(this.messageLogPath, 'utf-8')
-      .split('\n')
-      .filter(Boolean);
+    // Read the last portion of the file to avoid loading everything into memory.
+    // With log rotation capping at 5,000 lines, this is a bounded operation,
+    // but we still optimize by reading only what we need for most cases.
+    const content = fs.readFileSync(this.messageLogPath, 'utf-8');
+    const lines = content.split('\n').filter(Boolean);
 
+    // Scan from end to find matching entries (most recent first)
     const matching: LogEntry[] = [];
-    for (const line of lines) {
+    for (let i = lines.length - 1; i >= 0 && matching.length < limit; i--) {
       try {
-        const entry: LogEntry = JSON.parse(line);
+        const entry: LogEntry = JSON.parse(lines[i]);
         if (entry.topicId === topicId) {
-          matching.push(entry);
+          matching.unshift(entry); // Maintain chronological order
         }
       } catch { /* skip malformed */ }
     }
 
-    return matching.slice(-limit);
+    return matching;
   }
 
   private appendToLog(entry: LogEntry): void {
     try {
       fs.appendFileSync(this.messageLogPath, JSON.stringify(entry) + '\n');
+      // Rotate log if it exceeds 10,000 lines to prevent unbounded growth
+      this.maybeRotateLog();
     } catch (err) {
       console.error(`[telegram] Failed to append to message log: ${err}`);
+    }
+  }
+
+  /** Keep only the last 5,000 lines when log exceeds 10,000 lines. */
+  private maybeRotateLog(): void {
+    try {
+      const stat = fs.statSync(this.messageLogPath);
+      // Only check rotation when file exceeds ~2MB (rough proxy for 10k lines)
+      if (stat.size < 2 * 1024 * 1024) return;
+
+      const content = fs.readFileSync(this.messageLogPath, 'utf-8');
+      const lines = content.split('\n').filter(Boolean);
+      if (lines.length > 10_000) {
+        const kept = lines.slice(-5_000);
+        const tmpPath = `${this.messageLogPath}.tmp`;
+        fs.writeFileSync(tmpPath, kept.join('\n') + '\n');
+        fs.renameSync(tmpPath, this.messageLogPath);
+        console.log(`[telegram] Rotated message log: ${lines.length} → ${kept.length} lines`);
+      }
+    } catch {
+      // Non-critical — don't fail on rotation errors
     }
   }
 
