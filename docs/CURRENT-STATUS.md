@@ -8,12 +8,12 @@ Persistent autonomy infrastructure for AI agents. Gives Claude Code a persistent
 
 ## Secured Assets
 
-- **npm**: `instar` (latest: 0.1.10) — https://www.npmjs.com/package/instar
+- **npm**: `instar` (latest: 0.1.11) — https://www.npmjs.com/package/instar
 - **GitHub**: https://github.com/SageMindAI/instar (under SageMindAI org)
 - **Domain**: `instar.sh` (purchased; Astro landing page built in `site/`, awaiting deployment)
 - **Source**: `/tmp/instar-src/` on workstation (cloned from GitHub)
 
-## Current Version: 0.1.10
+## Current Version: 0.1.11
 
 ### What's Shipped
 - Full CLI: `instar`, `instar init`, `instar setup`, `instar server start/stop`, `instar status`, `instar user/job add/list`, `instar add`, `instar feedback`

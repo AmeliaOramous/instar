@@ -1,0 +1,225 @@
+# Instar Crucible Review Report
+
+**Date**: 2026-02-20
+**Duration**: 8-hour autonomous session (AUT-1655-wo)
+**Starting Version**: 0.1.10
+**Ending Version**: 0.1.11
+**Commits**: 47
+**Files Changed**: 102 (8,574 lines added, 544 removed)
+**Tests**: 350 -> 647 (unit) + 37 (integration) + 9 (e2e) = 693 total
+**TypeScript**: Compiles cleanly with `--strict`
+**Package Size**: 98.2 kB (60 files)
+
+---
+
+## Executive Summary
+
+Comprehensive production-readiness review of Instar v0.1.10 across 53 iterations, covering every source file (28 files), all templates, all tests, docs, package config, and CI readiness. The review found and fixed **security vulnerabilities**, **data integrity issues**, **naming inconsistencies**, **documentation drift**, and **edge case gaps**. The codebase moved from "promising prototype" to "production-ready foundation."
+
+---
+
+## Major Areas Addressed
+
+### 1. Security Hardening (CRITICAL)
+
+**Shell Injection Prevention**
+- Migrated ALL `execSync()` calls to `execFileSync()` with argument arrays
+- No shell string interpolation anywhere in the codebase
+- Verified: tmux commands, Claude CLI spawning, prerequisite detection
+
+**Path Traversal Prevention**
+- Added project name validation in `init` command: `/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/`
+- Session name validation: `/^[a-zA-Z0-9_-]{1,200}$/`
+- Job slug validation: `/^[a-zA-Z0-9_-]{1,100}$/`
+- RelationshipManager key validation: alphanumeric + hyphens only, no `..`
+
+**Auth Security**
+- Timing-safe token comparison using SHA-256 hashing (prevents length leak)
+- All endpoints protected by global `authMiddleware` (except `/health`)
+- Rate limiting on session spawn endpoint (sliding window, per-IP, with GC)
+- Feedback webhook uses crypto `randomUUID()` for IDs (not sequential)
+
+**Gitignore Security**
+- Both `setup.ts` and `init.ts` now exclude `.instar/config.json` (contains auth token)
+- Also excludes `.instar/relationships/` (personal data)
+
+**Data Leak Prevention**
+- Fixed `FeedbackManager.retryUnforwarded()` sending full internal metadata to webhook
+- Now sends only safe fields (matching `submit()` behavior)
+- Token values redacted in Telegram logs (`BOT_TOKEN` -> `...XXXX`)
+
+### 2. Data Integrity (HIGH)
+
+**Atomic Writes**
+- Every file write uses unique temp filenames: `${file}.${pid}.${random}.tmp`
+- Pattern: write to temp -> rename atomically
+- Covers: StateManager, RelationshipManager, FeedbackManager, UserManager, TelegramAdapter registry, job state
+
+**Corruption Recovery**
+- All JSON file reads wrapped in try-catch with descriptive error logging
+- Corrupted files backed up to `.corrupt.{timestamp}` before recovery
+- StateManager skips corrupted entries in listings (doesn't crash)
+- UserManager loads initial users even when file is corrupted
+
+**Concurrent Operation Safety**
+- Rate limiter uses per-IP tracking with periodic GC (prevents unbounded memory)
+- Session monitoring has overlap guard (boolean flag)
+- Queue deduplication prevents duplicate job enqueues
+
+### 3. Naming Consistency (MEDIUM)
+
+**AgentKitConfig -> InstarConfig**
+- Renamed across 16 files (source + tests)
+- Added backwards-compatible `type AgentKitConfig = InstarConfig` with `@deprecated`
+- Renamed `findAgentKitRoot` -> `findInstarRoot`
+- Renamed `agentKitRoot` -> `instarRoot`
+- Renamed `agentKitIgnores` -> `instarIgnores`
+
+### 4. Test Coverage (HIGH)
+
+**Before**: 350 tests across ~40 test files
+**After**: 647 tests across 76 test files + 37 integration + 9 e2e
+
+New test areas added:
+- Route validation edge cases (26 tests)
+- Atomic write consistency (21 tests)
+- Scheduler queue behavior (11 tests)
+- Relationship stale/context APIs (8 tests)
+- Session reaping detection (19 tests)
+- Telegram registry/log operations (16 tests)
+- Middleware exports verification (8 tests)
+- Quota tracker boundaries (8 tests)
+- Feedback manager edges (8 tests)
+- Update checker edges (5 tests)
+- User manager corruption (19 tests)
+- Security hardening verification (16 tests)
+- Input validation (6 tests)
+- Session timeout enforcement (4 tests)
+- CORS middleware (4 tests)
+- ESM compliance (2 tests)
+- CLI add commands (16 tests)
+- Plus integration tests for fresh-install (16), server-full (14), scheduler (1), session-lifecycle (6), and e2e lifecycle (9)
+
+### 5. Error Handling
+
+- Cron expression parsing errors caught gracefully (scheduler continues with valid jobs)
+- EADDRINUSE error gives clear message on port conflict
+- Server graceful shutdown with 5-second force-close for keep-alive connections
+- Request timeout middleware (configurable, default 30s)
+- Global error handler never leaks internal details to clients
+- Telegram 429 rate limiting: reads `retry_after` from API response and waits
+
+### 6. Documentation Consistency
+
+- Stale test counts fixed: 406 -> 647, 639 -> 647 across docs
+- positioning-vs-openclaw.md kept current
+- CURRENT-STATUS.md updated to v0.1.11
+- README endpoint table matches actual routes
+- Hook descriptions match actual behavior
+
+### 7. Package Quality
+
+- `.npmignore` properly excludes: src/, tests/, docs/, site/, assets/, .github/, source maps
+- Includes: dist/ (compiled JS + type declarations), README.md, LICENSE, setup-wizard skill
+- Package size: 98.2 kB (60 files) -- lean and focused
+- Shebang present in CLI entry point
+- `prepublishOnly` runs `npm run build`
+- ESM modules with proper `type: "module"` and Node16 module resolution
+
+---
+
+## Files Modified (All 28 Source Files Reviewed)
+
+### Core (8 files)
+| File | Changes |
+|------|---------|
+| `Config.ts` | Nullish coalescing for maxSessions, `loadConfig` type fixes |
+| `SessionManager.ts` | execFileSync migration, async monitoring, temp file uniqueness |
+| `StateManager.ts` | Atomic writes, corruption recovery, null safety |
+| `RelationshipManager.ts` | Key validation, atomic writes, merge/delete safety |
+| `FeedbackManager.ts` | Unique temp files, webhook data leak fix, type-safe payload |
+| `UpdateChecker.ts` | Async startup (non-blocking), edge case handling |
+| `SleepWakeDetector.ts` | Clean, no changes needed |
+| `types.ts` | InstarConfig rename, backwards-compat alias |
+
+### Server (3 files)
+| File | Changes |
+|------|---------|
+| `AgentServer.ts` | Graceful shutdown with force-close timer |
+| `routes.ts` | Input validation on all endpoints, route ordering, auth header project field |
+| `middleware.ts` | Timing-safe auth, per-IP rate limiter, request timeout, error handler |
+
+### Scheduler (2 files)
+| File | Changes |
+|------|---------|
+| `JobScheduler.ts` | Cron error handling, queue cap (50), re-enqueue on quota failure |
+| `JobLoader.ts` | Clean, excellent validation already present |
+
+### Messaging (1 file)
+| File | Changes |
+|------|---------|
+| `TelegramAdapter.ts` | Token redaction, 429 backoff, atomic registry writes, JSONL log rotation |
+
+### Monitoring (2 files)
+| File | Changes |
+|------|---------|
+| `HealthChecker.ts` | Clean, no significant changes |
+| `QuotaTracker.ts` | Fail-open when no file, staleness detection |
+
+### Commands (6 files)
+| File | Changes |
+|------|---------|
+| `init.ts` | Project name validation, gitignore security, InstarConfig rename |
+| `setup.ts` | Gitignore security (config.json, relationships/), InstarConfig rename |
+| `server.ts` | Clean, no significant changes |
+| `status.ts` | Replaced execSync with fetch |
+| `cli.ts` | Dynamic version loading, unique temp files, proper exit codes |
+| `job.ts` | Unique temp files |
+
+### Scaffold (2 files)
+| File | Changes |
+|------|---------|
+| `bootstrap.ts` | Clean, no changes needed |
+| `templates.ts` | Clean, no changes needed |
+
+### Users (1 file)
+| File | Changes |
+|------|---------|
+| `UserManager.ts` | Atomic writes, corruption recovery |
+
+### Entry (1 file)
+| File | Changes |
+|------|---------|
+| `index.ts` | Proper type exports, InstarConfig rename |
+
+---
+
+## Known Limitations (Documented, Not Blocking)
+
+1. **Single-threaded session cap**: Race condition possible under extreme concurrent load (JavaScript is single-threaded so real-world risk is minimal)
+2. **No clock skew handling**: Cron scheduler trusts system clock; NTP adjustments could cause double-fires
+3. **Telegram temp files**: History files in `/tmp/instar-telegram/` not auto-cleaned (accumulate slowly)
+4. **Polling offset not persisted**: Telegram `lastUpdateId` resets on process restart (messages could re-process)
+5. **JSONL log reads full file**: Message history query loads all lines into memory before filtering
+6. **No CI/CD pipeline**: No GitHub Actions configured yet (`.github/` not present)
+
+---
+
+## Recommendations for Next Release
+
+1. **Deploy landing page**: Astro site built in `site/`, needs Vercel deployment for instar.sh
+2. **Make GitHub repo public**: Currently private under SageMindAI org
+3. **Add GitHub Actions CI**: Run tests on PR, publish to npm on tag
+4. **Telegram polling offset persistence**: Save/restore `lastUpdateId` to survive restarts
+5. **Temp file cleanup**: Add a periodic cleanup for `/tmp/instar-telegram/` files older than 7 days
+6. **Consider Slack adapter**: Follows TelegramAdapter pattern; most-requested missing feature
+
+---
+
+## Version Bump
+
+**0.1.10 -> 0.1.11**: Security hardening, data integrity improvements, naming consistency, documentation updates, 297 new tests, production-readiness fixes across all 28 source files.
+
+---
+
+*Report generated during AUT-1655-wo crucible session. 47 commits, 102 files changed, 8,574 lines added. Every source file individually reviewed. All 693 tests passing.*
