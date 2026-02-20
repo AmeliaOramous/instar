@@ -16,6 +16,7 @@ import { rateLimiter } from './middleware.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { RelationshipManager } from '../core/RelationshipManager.js';
 import type { FeedbackManager } from '../core/FeedbackManager.js';
+import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
 
@@ -27,6 +28,7 @@ export interface RouteContext {
   telegram: TelegramAdapter | null;
   relationships: RelationshipManager | null;
   feedback: FeedbackManager | null;
+  dispatches: DispatchManager | null;
   updateChecker: UpdateChecker | null;
   quotaTracker: QuotaTracker | null;
   startTime: Date;
@@ -486,6 +488,54 @@ export function createRoutes(ctx: RouteContext): Router {
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Dispatches ───────────────────────────────────────────────────
+
+  router.get('/dispatches', async (_req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    try {
+      const result = await ctx.dispatches.check();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/dispatches/pending', (_req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    res.json({ dispatches: ctx.dispatches.pending() });
+  });
+
+  router.get('/dispatches/context', (_req, res) => {
+    if (!ctx.dispatches) {
+      res.json({ context: '' });
+      return;
+    }
+
+    res.json({ context: ctx.dispatches.generateContext() });
+  });
+
+  router.post('/dispatches/:id/apply', (req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    const success = ctx.dispatches.markApplied(req.params.id);
+    if (success) {
+      res.json({ applied: true });
+    } else {
+      res.status(404).json({ error: 'Dispatch not found' });
     }
   });
 

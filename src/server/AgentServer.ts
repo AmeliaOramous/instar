@@ -14,6 +14,7 @@ import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { InstarConfig } from '../core/types.js';
 import type { RelationshipManager } from '../core/RelationshipManager.js';
 import type { FeedbackManager } from '../core/FeedbackManager.js';
+import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import { createRoutes } from './routes.js';
@@ -33,6 +34,7 @@ export class AgentServer {
     telegram?: TelegramAdapter;
     relationships?: RelationshipManager;
     feedback?: FeedbackManager;
+    dispatches?: DispatchManager;
     updateChecker?: UpdateChecker;
     quotaTracker?: QuotaTracker;
   }) {
@@ -55,6 +57,7 @@ export class AgentServer {
       telegram: options.telegram ?? null,
       relationships: options.relationships ?? null,
       feedback: options.feedback ?? null,
+      dispatches: options.dispatches ?? null,
       updateChecker: options.updateChecker ?? null,
       quotaTracker: options.quotaTracker ?? null,
       startTime: this.startTime,

@@ -376,9 +376,22 @@ export interface InstarConfig {
   relationships?: RelationshipManagerConfig;
   /** Feedback loop config */
   feedback?: FeedbackConfig;
+  /** Dispatch (intelligence broadcast) config */
+  dispatches?: DispatchConfig;
   /** Request timeout in milliseconds (default: 30000) */
   requestTimeoutMs?: number;
   /** Instar version (from package.json) */
+  version?: string;
+}
+
+export interface DispatchConfig {
+  /** Whether dispatch polling is enabled */
+  enabled: boolean;
+  /** URL to poll for dispatches */
+  dispatchUrl: string;
+  /** Local dispatch storage file */
+  dispatchFile: string;
+  /** Instar version — sent in headers for version-specific filtering */
   version?: string;
 }
 

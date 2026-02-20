@@ -20,6 +20,7 @@ import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
+import { DispatchManager } from '../core/DispatchManager.js';
 import { UpdateChecker } from '../core/UpdateChecker.js';
 import type { Message } from '../core/types.js';
 
@@ -307,6 +308,16 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
       console.log(pc.green('  Feedback loop enabled'));
     }
+    // Set up dispatch system
+    let dispatches: DispatchManager | undefined;
+    if (config.dispatches) {
+      dispatches = new DispatchManager({
+        ...config.dispatches,
+        version: config.version,
+      });
+      console.log(pc.green('  Dispatch system enabled'));
+    }
+
     const updateChecker = new UpdateChecker(config.stateDir);
 
     // Check for updates on startup
@@ -319,7 +330,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }).catch(() => { /* ignore startup check failures */ });
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, updateChecker });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker });
     await server.start();
 
     // Graceful shutdown
