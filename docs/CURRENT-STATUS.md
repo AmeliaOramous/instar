@@ -81,7 +81,7 @@ src/
 - `src/commands/setup.ts` — Interactive setup wizard (classic mode)
 - `src/commands/init.ts` — Non-interactive init (fresh project or existing)
 - `src/scaffold/bootstrap.ts` — Identity bootstrap (initiative levels)
-- `.claude/skills/setup-wizard/skill.md` — Conversational wizard prompt (dev only, not in npm)
+- `.claude/skills/setup-wizard/skill.md` — Conversational wizard prompt (included in npm package)
 - `src/scheduler/JobScheduler.ts` — Cron-based job scheduling with priority
 - `src/server/middleware.ts` — CORS, auth (timing-safe), error handling
 

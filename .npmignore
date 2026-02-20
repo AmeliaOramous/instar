@@ -13,8 +13,11 @@ vitest.config.ts
 vitest.e2e.config.ts
 vitest.integration.config.ts
 
-# Claude Code config (dev-only)
-.claude/
+# Claude Code config (dev-only, except setup-wizard skill)
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/setup-wizard/
 CLAUDE.md
 
 # Landing page site
