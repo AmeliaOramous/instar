@@ -15,6 +15,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { UpdateInfo, UpdateResult } from './types.js';
+import { refreshHooksAndSettings } from '../commands/init.js';
 
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/SageMindAI/instar/releases';
 
@@ -130,6 +131,14 @@ export class UpdateChecker {
     // Save rollback info on successful update
     if (success) {
       this.saveRollbackInfo(previousVersion, newVersion);
+
+      // Refresh hooks and settings — new versions may include new hooks
+      try {
+        const projectDir = path.resolve(this.stateDir, '..');
+        refreshHooksAndSettings(projectDir, this.stateDir);
+      } catch {
+        // Non-critical — hooks can be refreshed manually via `instar init`
+      }
     }
 
     return {
@@ -137,7 +146,7 @@ export class UpdateChecker {
       previousVersion,
       newVersion,
       message: success
-        ? `Updated from v${previousVersion} to v${newVersion}. ${info.changeSummary || 'Restart to use the new version.'}`
+        ? `Updated from v${previousVersion} to v${newVersion}. Hooks refreshed. ${info.changeSummary || 'Restart to use the new version.'}`
         : `Update command ran but version didn't change (still v${previousVersion}). May need manual intervention.`,
       restartNeeded: success,
       healthCheck: 'skipped', // Can't check health until after restart

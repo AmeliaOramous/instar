@@ -632,6 +632,16 @@ function getDefaultJobs(port: number): object[] {
   ];
 }
 
+/**
+ * Refresh hooks and Claude settings for an existing installation.
+ * Called after updates to ensure new hooks are installed.
+ * Re-writes all hook files (idempotent) and merges new hooks into settings.
+ */
+export function refreshHooksAndSettings(projectDir: string, stateDir: string): void {
+  installHooks(stateDir);
+  installClaudeSettings(projectDir);
+}
+
 function installHooks(stateDir: string): void {
   const hooksDir = path.join(stateDir, 'hooks');
   fs.mkdirSync(hooksDir, { recursive: true });
@@ -696,6 +706,134 @@ if [ -f "$INSTAR_DIR/AGENT.md" ]; then
   echo "Read .instar/AGENT.md and .instar/MEMORY.md to restore full context."
 fi
 `, { mode: 0o755 });
+
+  // Deferral detector — catches agents deferring work they could do themselves.
+  // PreToolUse hook for Bash. Scans outgoing communication for deferral patterns.
+  // When detected, injects a due diligence checklist as additionalContext.
+  // Does NOT block — just adds awareness so the agent can reconsider.
+  fs.writeFileSync(path.join(hooksDir, 'deferral-detector.js'), `#!/usr/bin/env node
+// Deferral detector — catches agents deferring work they could do themselves.
+// PreToolUse hook for Bash commands. Scans outgoing messages for deferral patterns.
+// When detected, injects a due diligence checklist (does NOT block).
+//
+// Born from an agent saying "This is credential input I cannot do myself"
+// when it already had the token available via CLI tools.
+
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(data);
+    if (input.tool_name !== 'Bash') process.exit(0);
+
+    const command = (input.tool_input || {}).command || '';
+    if (!command) process.exit(0);
+
+    // Only check communication commands (messages to humans)
+    const commPatterns = [
+      /telegram-reply/i, /send-email/i, /send-message/i,
+      /POST.*\\/telegram\\/reply/i, /slack.*send/i
+    ];
+    if (!commPatterns.some(p => p.test(command))) process.exit(0);
+
+    // Exempt: genuinely human-only actions
+    if (/password|captcha|legal|billing|payment credential/i.test(command)) process.exit(0);
+
+    // Deferral patterns
+    const patterns = [
+      { re: /(?:I |i )(?:can'?t|cannot|am (?:not |un)able to)/i, type: 'inability_claim' },
+      { re: /(?:this |it )(?:requires|needs) (?:your|human|manual) (?:input|intervention|action)/i, type: 'human_required' },
+      { re: /you(?:'ll| will)? need to (?:do|handle|complete|input|enter|run|execute|click)/i, type: 'directing_human' },
+      { re: /(?:you (?:can|could|should|might want to) )(?:run|execute|navigate|open|click)/i, type: 'suggesting_human_action' },
+      { re: /(?:want me to|should I|shall I|would you like me to) (?:proceed|continue|go ahead)/i, type: 'permission_seeking' },
+      { re: /(?:blocker|blocking issue|can'?t proceed (?:without|until))/i, type: 'claimed_blocker' },
+    ];
+
+    const matches = patterns.filter(p => p.re.test(command));
+    if (matches.length === 0) process.exit(0);
+
+    const checklist = [
+      'DEFERRAL DETECTED — Before claiming you cannot do something, verify:',
+      '',
+      '1. Did you check --help or docs for the tool you are using?',
+      '2. Did you search for a token/API-based alternative to interactive auth?',
+      '3. Do you already have credentials/tokens that might work? (env vars, CLI auth, saved configs)',
+      '4. Can you use browser automation to complete interactive flows?',
+      '5. Is this GENUINELY beyond your access? (e.g., typing a password, solving a CAPTCHA)',
+      '',
+      'If ANY check might work — try it first.',
+      'The pattern: You are DESCRIBING work instead of DOING work.',
+      '',
+      'Detected: ' + matches.map(m => m.type).join(', '),
+    ].join('\\n');
+
+    process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: checklist }));
+  } catch { /* don't break on errors */ }
+  process.exit(0);
+});
+`, { mode: 0o755 });
+
+  // External communication guard — ensures identity grounding before external posting.
+  // PreToolUse hook for Bash. Detects commands that post to external platforms.
+  // Injects a reminder to re-read identity before sending. Advisory, not blocking.
+  fs.writeFileSync(path.join(hooksDir, 'external-communication-guard.js'), `#!/usr/bin/env node
+// External communication guard — identity grounding before external posting.
+// PreToolUse hook for Bash. Detects external posting commands (curl POST, API calls,
+// CLI tools that post to external services). Injects identity re-read reminder.
+//
+// "An agent that knows itself is harder to compromise."
+// "An agent that forgets itself posts things it shouldn't."
+
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(data);
+    if (input.tool_name !== 'Bash') process.exit(0);
+
+    const command = (input.tool_input || {}).command || '';
+    if (!command) process.exit(0);
+
+    // Patterns that indicate external posting
+    const postingPatterns = [
+      /curl\\s.*-X\\s+POST/i,
+      /curl\\s.*-X\\s+PUT/i,
+      /curl\\s.*-X\\s+PATCH/i,
+      /curl\\s.*-d\\s+['"]/i,
+      /curl\\s.*--data/i,
+      /gh\\s+issue\\s+(?:comment|create)/i,
+      /gh\\s+pr\\s+(?:comment|create|review)/i,
+      /gh\\s+api\\s+graphql.*mutation/i,
+      /sendgrid|mailgun|ses\\.amazonaws.*send/i,
+      /telegram-reply/i,
+      /send-email/i,
+      /slack.*(?:chat\\.postMessage|send)/i,
+    ];
+
+    if (!postingPatterns.some(p => p.test(command))) process.exit(0);
+
+    // Exempt: localhost, internal APIs, health checks
+    if (/localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0/i.test(command)) process.exit(0);
+    if (/curl\\s+-s\\s+https?:\\/\\/[^\\s]+\\s*$/i.test(command)) process.exit(0);  // Simple GET
+    if (/heartbeat|keepalive|health/i.test(command)) process.exit(0);
+
+    const reminder = [
+      'EXTERNAL COMMUNICATION DETECTED — Identity grounding check:',
+      '',
+      'Before posting externally, verify:',
+      '1. Have you read .instar/AGENT.md recently in this session?',
+      '2. Does this message represent who you are and your principles?',
+      '3. Are you posting something you would stand behind across sessions?',
+      '4. Is the tone and content consistent with your identity?',
+      '',
+      'Security Through Identity: An agent that knows itself is harder to compromise.',
+    ].join('\\n');
+
+    process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: reminder }));
+  } catch { /* don't break on errors */ }
+  process.exit(0);
+});
+`, { mode: 0o755 });
 }
 
 function installHealthWatchdog(projectDir: string, port: number, projectName: string): void {
@@ -750,25 +888,49 @@ function installClaudeSettings(projectDir: string): void {
   }
   const hooks = settings.hooks as Record<string, unknown[]>;
 
-  // PreToolUse: dangerous command guard + grounding before messaging
+  // All instar-managed hooks for PreToolUse/Bash
+  const instarBashHooks = [
+    {
+      type: 'command',
+      command: 'bash .instar/hooks/dangerous-command-guard.sh "$TOOL_INPUT"',
+      blocking: true,
+    },
+    {
+      type: 'command',
+      command: 'bash .instar/hooks/grounding-before-messaging.sh "$TOOL_INPUT"',
+      blocking: false,
+    },
+    {
+      type: 'command',
+      command: 'node .instar/hooks/deferral-detector.js',
+      timeout: 5000,
+    },
+    {
+      type: 'command',
+      command: 'node .instar/hooks/external-communication-guard.js',
+      timeout: 5000,
+    },
+  ];
+
+  // PreToolUse: merge instar hooks into existing or create fresh
   if (!hooks.PreToolUse) {
-    hooks.PreToolUse = [
-      {
-        matcher: 'Bash',
-        hooks: [
-          {
-            type: 'command',
-            command: 'bash .instar/hooks/dangerous-command-guard.sh "$TOOL_INPUT"',
-            blocking: true,
-          },
-          {
-            type: 'command',
-            command: 'bash .instar/hooks/grounding-before-messaging.sh "$TOOL_INPUT"',
-            blocking: false,
-          },
-        ],
-      },
-    ];
+    hooks.PreToolUse = [{ matcher: 'Bash', hooks: instarBashHooks }];
+  } else {
+    // Find existing Bash matcher or create one
+    const preToolUse = hooks.PreToolUse as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
+    let bashEntry = preToolUse.find(e => e.matcher === 'Bash');
+    if (!bashEntry) {
+      bashEntry = { matcher: 'Bash', hooks: [] };
+      preToolUse.push(bashEntry);
+    }
+    if (!bashEntry.hooks) bashEntry.hooks = [];
+    // Add any instar hooks not already present (by command string)
+    const existingCommands = new Set(bashEntry.hooks.map(h => h.command));
+    for (const hook of instarBashHooks) {
+      if (!existingCommands.has(hook.command)) {
+        bashEntry.hooks.push(hook);
+      }
+    }
   }
 
   // PostToolUse: session start identity injection
