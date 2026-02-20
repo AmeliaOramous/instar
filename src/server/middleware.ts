@@ -6,7 +6,11 @@ import type { Request, Response, NextFunction } from 'express';
 import { timingSafeEqual } from 'node:crypto';
 
 export function corsMiddleware(req: Request, res: Response, next: NextFunction): void {
-  res.header('Access-Control-Allow-Origin', '*');
+  // Restrict CORS to localhost origins only — this is a local management API
+  const origin = req.headers.origin;
+  if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
   res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') {
@@ -53,10 +57,11 @@ export function authMiddleware(authToken?: string) {
   };
 }
 
-export function errorHandler(err: Error, _req: Request, res: Response, _next: NextFunction): void {
-  console.error(`[server] Error: ${err.message}`);
+export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[server] Error: ${message}`);
   res.status(500).json({
-    error: err.message,
+    error: message,
     timestamp: new Date().toISOString(),
   });
 }

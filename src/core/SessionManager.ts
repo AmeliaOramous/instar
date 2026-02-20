@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
 import { StateManager } from './StateManager.js';
@@ -111,18 +112,24 @@ export class SessionManager extends EventEmitter {
       throw new Error(`tmux session "${tmuxSession}" already exists`);
     }
 
-    // Build the claude command
+    // Write prompt to temp file to avoid shell injection via bash -c string interpolation.
+    // The prompt is user-controlled (arrives via HTTP API), so we must never pass it
+    // through a shell interpreter. Writing to a file and reading it back is safe.
+    const promptDir = path.join(os.tmpdir(), 'instar-prompts');
+    fs.mkdirSync(promptDir, { recursive: true });
+    const promptFile = path.join(promptDir, `${sessionId}.txt`);
+    fs.writeFileSync(promptFile, options.prompt);
+
+    // Build a shell command that reads the prompt from the temp file
     const claudeArgs = ['--dangerously-skip-permissions'];
     if (options.model) {
       claudeArgs.push('--model', options.model);
     }
-    claudeArgs.push('-p', options.prompt);
-
-    // Create tmux session and run claude
-    // Respect the user's configured auth method (API key or OAuth subscription)
-    // Use execFileSync with argument arrays to prevent command injection
+    // Use execFileSync with argument arrays for the tmux call.
+    // The inner command reads the prompt from a file, avoiding shell interpretation of user input.
     const quotedClaudePath = `'${this.config.claudePath.replace(/'/g, "'\\''")}'`;
-    const claudeCmd = `${quotedClaudePath} ${claudeArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')}`;
+    const quotedPromptFile = `'${promptFile.replace(/'/g, "'\\''")}'`;
+    const claudeCmd = `${quotedClaudePath} ${claudeArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ')} -p "$(cat ${quotedPromptFile})" ; rm -f ${quotedPromptFile}`;
     try {
       execFileSync(this.config.tmuxPath, [
         'new-session', '-d',
@@ -131,6 +138,8 @@ export class SessionManager extends EventEmitter {
         'bash', '-c', claudeCmd,
       ], { encoding: 'utf-8' });
     } catch (err) {
+      // Clean up prompt file on failure
+      try { fs.unlinkSync(promptFile); } catch { /* ignore */ }
       throw new Error(`Failed to create tmux session: ${err}`);
     }
 

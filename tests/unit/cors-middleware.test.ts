@@ -25,6 +25,18 @@ describe('CORS middleware configuration', () => {
     expect(middlewareSource).toContain('Access-Control-Allow-Origin');
   });
 
+  it('restricts CORS to localhost origins only (no wildcard)', () => {
+    const middlewareSource = fs.readFileSync(
+      path.join(process.cwd(), 'src/server/middleware.ts'),
+      'utf-8'
+    );
+    // Should NOT have wildcard origin — this is a local management API
+    expect(middlewareSource).not.toContain("Allow-Origin', '*'");
+    // Should validate origin against localhost pattern
+    expect(middlewareSource).toContain('localhost');
+    expect(middlewareSource).toContain('127');
+  });
+
   it('handles OPTIONS preflight requests', () => {
     const middlewareSource = fs.readFileSync(
       path.join(process.cwd(), 'src/server/middleware.ts'),

@@ -127,8 +127,8 @@ export class HealthChecker {
         message: `${running.length}/${max} sessions active`,
         lastCheck: now,
       };
-    } catch (err: any) {
-      return { status: 'unhealthy', message: `Session check failed: ${err.message}`, lastCheck: now };
+    } catch (err) {
+      return { status: 'unhealthy', message: `Session check failed: ${err instanceof Error ? err.message : String(err)}`, lastCheck: now };
     }
   }
 
@@ -169,8 +169,8 @@ export class HealthChecker {
       fs.unlinkSync(testFile);
 
       return { status: 'healthy', message: 'State directory writable', lastCheck: now };
-    } catch (err: any) {
-      return { status: 'unhealthy', message: `State dir error: ${err.message}`, lastCheck: now };
+    } catch (err) {
+      return { status: 'unhealthy', message: `State dir error: ${err instanceof Error ? err.message : String(err)}`, lastCheck: now };
     }
   }
 }

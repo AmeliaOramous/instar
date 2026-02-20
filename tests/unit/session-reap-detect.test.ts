@@ -128,6 +128,15 @@ describe('Session reaping and detection', () => {
       source = fs.readFileSync(SOURCE_PATH, 'utf-8');
       expect(source).toContain("replace(/'/g, \"'\\\\''\")");
     });
+
+    it('writes prompt to temp file to prevent shell injection', () => {
+      source = fs.readFileSync(SOURCE_PATH, 'utf-8');
+      // The prompt should be written to a file, not passed directly as a shell argument
+      expect(source).toContain('instar-prompts');
+      expect(source).toContain('fs.writeFileSync(promptFile, options.prompt)');
+      // The shell command should read from the file, not interpolate the prompt
+      expect(source).toContain('cat ${quotedPromptFile}');
+    });
   });
 
   describe('spawnInteractiveSession', () => {

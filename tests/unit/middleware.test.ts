@@ -112,4 +112,16 @@ describe('errorHandler', () => {
     expect(res.body.error).toBe('test error');
     expect(res.body).toHaveProperty('timestamp');
   });
+
+  it('errorHandler uses proper type narrowing (not err: any)', () => {
+    const source = require('fs').readFileSync(
+      require('path').join(process.cwd(), 'src/server/middleware.ts'),
+      'utf-8'
+    );
+    // Should use `err: unknown` not `err: any`
+    expect(source).toContain('err: unknown');
+    expect(source).not.toContain('err: any');
+    // Should use instanceof Error check
+    expect(source).toContain('err instanceof Error');
+  });
 });

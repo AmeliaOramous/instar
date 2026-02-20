@@ -213,6 +213,13 @@ export async function startServer(options: StartOptions): Promise<void> {
     console.log(`  State: ${config.stateDir}`);
     console.log();
 
+    // Warn if no auth token configured — server allows unauthenticated access
+    if (!config.authToken) {
+      console.log(pc.yellow(pc.bold('  ⚠ WARNING: No auth token configured — all API endpoints are unauthenticated!')));
+      console.log(pc.yellow('  Set authToken in .instar/config.json or re-run instar init'));
+      console.log();
+    }
+
     const state = new StateManager(config.stateDir);
     const sessionManager = new SessionManager(config.sessions, state);
     let relationships: RelationshipManager | undefined;

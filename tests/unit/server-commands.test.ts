@@ -39,6 +39,19 @@ describe('server command security', () => {
   });
 });
 
+describe('server startup warnings', () => {
+  it('server.ts warns when no auth token is configured', () => {
+    const source = require('fs').readFileSync(
+      path.join(process.cwd(), 'src/commands/server.ts'),
+      'utf-8'
+    );
+    // Should check for missing authToken and warn
+    expect(source).toContain('!config.authToken');
+    expect(source).toContain('WARNING');
+    expect(source).toContain('unauthenticated');
+  });
+});
+
 describe('server session name derivation', () => {
   it('server session name is derived from project name', () => {
     const projectName = 'my-agent';

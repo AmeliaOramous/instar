@@ -17,8 +17,8 @@ export async function showStatus(options: StatusOptions): Promise<void> {
   let config;
   try {
     config = loadConfig(options.dir);
-  } catch (err: any) {
-    console.log(pc.red(`Not initialized: ${err.message}`));
+  } catch (err) {
+    console.log(pc.red(`Not initialized: ${err instanceof Error ? err.message : String(err)}`));
     console.log(`Run ${pc.cyan('instar init')} first.`);
     return;
   }

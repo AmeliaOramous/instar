@@ -55,9 +55,9 @@ export class FeedbackManager {
         } else {
           console.error(`[feedback] Webhook returned ${response.status}: ${response.statusText}`);
         }
-      } catch (err: any) {
+      } catch (err) {
         // Don't fail on webhook errors — the local record is the receipt
-        console.error(`[feedback] Webhook failed: ${err.message}`);
+        console.error(`[feedback] Webhook failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

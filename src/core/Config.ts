@@ -172,7 +172,7 @@ export function loadConfig(projectDir?: string): AgentKitConfig {
       maxRecentInteractions: 20,
     },
     feedback: fileConfig.feedback || {
-      enabled: true,
+      enabled: false,
       webhookUrl: 'https://dawn.bot-me.ai/api/instar/feedback',
       feedbackFile: path.join(stateDir, 'feedback.json'),
     },

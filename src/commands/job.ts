@@ -56,8 +56,8 @@ export async function addJob(options: JobAddOptions): Promise<void> {
   // Validate before saving
   try {
     validateJob(newJob);
-  } catch (err: any) {
-    console.log(pc.red(`Invalid job: ${err.message}`));
+  } catch (err) {
+    console.log(pc.red(`Invalid job: ${err instanceof Error ? err.message : String(err)}`));
     process.exit(1);
   }
 

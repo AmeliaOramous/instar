@@ -149,8 +149,8 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       const session = await ctx.sessionManager.spawnSession({ name, prompt, model, jobSlug });
       res.status(201).json(session);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -162,8 +162,8 @@ export function createRoutes(ctx: RouteContext): Router {
         return;
       }
       res.json({ ok: true, killed: req.params.id });
-    } catch (err: any) {
-      res.status(400).json({ error: err.message });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -194,8 +194,8 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       const result = ctx.scheduler.triggerJob(req.params.slug, reason);
       res.json({ slug: req.params.slug, result });
-    } catch (err: any) {
-      res.status(404).json({ error: err.message });
+    } catch (err) {
+      res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -221,8 +221,8 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       await ctx.telegram.sendToTopic(topicId, text);
       res.json({ ok: true, topicId });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -310,8 +310,8 @@ export function createRoutes(ctx: RouteContext): Router {
           ? 'Feedback submitted and forwarded upstream.'
           : 'Feedback stored locally. Will retry forwarding later.',
       });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -332,8 +332,8 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       const result = await ctx.feedback.retryUnforwarded();
       res.json({ ok: true, ...result });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -348,8 +348,8 @@ export function createRoutes(ctx: RouteContext): Router {
     try {
       const info = await ctx.updateChecker.check();
       res.json(info);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
