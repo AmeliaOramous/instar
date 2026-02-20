@@ -54,6 +54,14 @@ describe('Session name sanitization', () => {
     expect(sanitizeSessionName('my_session_name')).toBe('my_session_name');
   });
 
+  it('handles path-like names (slashes)', () => {
+    expect(sanitizeSessionName('a/b/c')).toBe('a-b-c');
+  });
+
+  it('handles dots in names', () => {
+    expect(sanitizeSessionName('session.v2.1')).toBe('session-v2-1');
+  });
+
   it('source file contains the sanitize function', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
