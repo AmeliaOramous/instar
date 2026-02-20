@@ -155,7 +155,7 @@ export function loadConfig(projectDir?: string): AgentKitConfig {
     },
     feedback: fileConfig.feedback || {
       enabled: true,
-      webhookUrl: 'https://api.instar.sh/feedback',
+      webhookUrl: 'https://dawn.bot-me.ai/api/instar/feedback',
       feedbackFile: path.join(stateDir, 'feedback.json'),
     },
   };
