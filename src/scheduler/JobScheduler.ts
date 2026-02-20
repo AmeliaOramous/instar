@@ -93,10 +93,14 @@ export class JobScheduler {
 
     const enabledJobs = this.jobs.filter(j => j.enabled);
     for (const job of enabledJobs) {
-      const task = new Cron(job.schedule, () => {
-        this.triggerJob(job.slug, 'scheduled');
-      });
-      this.cronTasks.set(job.slug, task);
+      try {
+        const task = new Cron(job.schedule, () => {
+          this.triggerJob(job.slug, 'scheduled');
+        });
+        this.cronTasks.set(job.slug, task);
+      } catch (err) {
+        console.error(`[scheduler] Invalid cron expression for job "${job.slug}": ${job.schedule} — ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     // Check for missed jobs — any enabled job overdue by >1.5x its interval

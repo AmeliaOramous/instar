@@ -318,15 +318,15 @@ async function runClassicSetup(): Promise<void> {
 
   // .gitignore
   const gitignorePath = path.join(projectDir, '.gitignore');
-  const agentKitIgnores = '\n# Instar runtime state\n.instar/state/\n.instar/logs/\n';
+  const instarIgnores = '\n# Instar runtime state (contains auth token, session data, relationships)\n.instar/state/\n.instar/logs/\n.instar/relationships/\n.instar/config.json\n';
   if (fs.existsSync(gitignorePath)) {
     const content = fs.readFileSync(gitignorePath, 'utf-8');
     if (!content.includes('.instar/')) {
-      fs.appendFileSync(gitignorePath, agentKitIgnores);
+      fs.appendFileSync(gitignorePath, instarIgnores);
       console.log(`  ${pc.green('✓')} Updated .gitignore`);
     }
   } else {
-    fs.writeFileSync(gitignorePath, agentKitIgnores.trim() + '\n');
+    fs.writeFileSync(gitignorePath, instarIgnores.trim() + '\n');
     console.log(`  ${pc.green('✓')} Created .gitignore`);
   }
 

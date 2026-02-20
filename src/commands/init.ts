@@ -68,6 +68,17 @@ export async function initProject(options: InitOptions): Promise<void> {
  * Fresh install: create a new project directory with everything scaffolded.
  */
 async function initFreshProject(projectName: string, options: InitOptions): Promise<void> {
+  // Validate project name — prevent path traversal, shell injection, and filesystem issues
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(projectName)) {
+    console.log(pc.red(`  Invalid project name: "${projectName}"`));
+    console.log(`  Project names must start with a letter or number and contain only letters, numbers, dots, hyphens, and underscores.`);
+    process.exit(1);
+  }
+  if (projectName === '.' || projectName === '..' || projectName.includes('/') || projectName.includes('\\')) {
+    console.log(pc.red(`  Invalid project name: "${projectName}"`));
+    process.exit(1);
+  }
+
   const projectDir = path.resolve(process.cwd(), projectName);
 
   console.log();
@@ -352,15 +363,15 @@ async function initExistingProject(options: InitOptions): Promise<void> {
 
   // Append to .gitignore
   const gitignorePath = path.join(projectDir, '.gitignore');
-  const agentKitIgnores = '\n# Instar runtime state (contains auth token, session data, relationships)\n.instar/state/\n.instar/logs/\n.instar/relationships/\n.instar/config.json\n';
+  const instarIgnores = '\n# Instar runtime state (contains auth token, session data, relationships)\n.instar/state/\n.instar/logs/\n.instar/relationships/\n.instar/config.json\n';
   if (fs.existsSync(gitignorePath)) {
     const content = fs.readFileSync(gitignorePath, 'utf-8');
     if (!content.includes('.instar/')) {
-      fs.appendFileSync(gitignorePath, agentKitIgnores);
+      fs.appendFileSync(gitignorePath, instarIgnores);
       console.log(pc.green('  Updated:') + ' .gitignore');
     }
   } else {
-    fs.writeFileSync(gitignorePath, agentKitIgnores.trim() + '\n');
+    fs.writeFileSync(gitignorePath, instarIgnores.trim() + '\n');
     console.log(pc.green('  Created:') + ' .gitignore');
   }
 
