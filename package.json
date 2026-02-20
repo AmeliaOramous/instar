@@ -1,6 +1,6 @@
 {
   "name": "instar",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Persistent autonomy infrastructure for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -30,7 +30,7 @@
     "automation",
     "claude-code"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
