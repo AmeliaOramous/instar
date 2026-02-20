@@ -62,7 +62,10 @@ export async function addJob(options: JobAddOptions): Promise<void> {
   }
 
   jobs.push(newJob);
-  fs.writeFileSync(jobsFile, JSON.stringify(jobs, null, 2));
+  // Atomic write: tmp + rename to prevent corruption
+  const tmpPath = jobsFile + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(jobs, null, 2));
+  fs.renameSync(tmpPath, jobsFile);
 
   console.log(pc.green(`Job "${options.name}" (${options.slug}) added.`));
   console.log(`  Schedule: ${options.schedule}`);
