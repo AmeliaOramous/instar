@@ -6,12 +6,15 @@
  * and can be monitored/reaped by the server.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+const execFileAsync = promisify(execFile);
 import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
 import { StateManager } from './StateManager.js';
 
@@ -28,6 +31,7 @@ export class SessionManager extends EventEmitter {
   private config: SessionManagerConfig;
   private state: StateManager;
   private monitorInterval: ReturnType<typeof setInterval> | null = null;
+  private monitoringInProgress = false;
 
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
@@ -38,14 +42,29 @@ export class SessionManager extends EventEmitter {
   /**
    * Start polling for completed sessions. Emits 'sessionComplete' when
    * a running session's tmux process disappears.
+   *
+   * Uses async tmux calls to avoid blocking the event loop when
+   * many sessions are running.
    */
   startMonitoring(intervalMs: number = 5000): void {
     if (this.monitorInterval) return;
 
     this.monitorInterval = setInterval(() => {
+      // Prevent overlapping monitor ticks
+      if (this.monitoringInProgress) return;
+      this.monitorTick().catch(err => {
+        console.error(`[SessionManager] Monitor tick error: ${err}`);
+      });
+    }, intervalMs);
+  }
+
+  private async monitorTick(): Promise<void> {
+    this.monitoringInProgress = true;
+    try {
       const running = this.state.listSessions({ status: 'running' });
       for (const session of running) {
-        if (!this.isSessionAlive(session.tmuxSession)) {
+        const alive = await this.isSessionAliveAsync(session.tmuxSession);
+        if (!alive) {
           session.status = 'completed';
           session.endedAt = new Date().toISOString();
           this.state.saveSession(session);
@@ -60,9 +79,7 @@ export class SessionManager extends EventEmitter {
           if (elapsed > limit && !this.config.protectedSessions.includes(session.tmuxSession)) {
             console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${session.maxDurationMinutes}m). Killing.`);
             try {
-              execFileSync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`], {
-                encoding: 'utf-8',
-              });
+              await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
             } catch { /* ignore */ }
             session.status = 'killed';
             session.endedAt = new Date().toISOString();
@@ -71,7 +88,9 @@ export class SessionManager extends EventEmitter {
           }
         }
       }
-    }, intervalMs);
+    } finally {
+      this.monitoringInProgress = false;
+    }
   }
 
   /**
@@ -161,10 +180,25 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Check if a session is still running by checking tmux.
+   * Check if a session is still running by checking tmux (sync version).
    */
   isSessionAlive(tmuxSession: string): boolean {
     return this.tmuxSessionExists(tmuxSession);
+  }
+
+  /**
+   * Check if a session is still running by checking tmux (async version).
+   * Used by the monitoring loop to avoid blocking the event loop.
+   */
+  private async isSessionAliveAsync(tmuxSession: string): Promise<boolean> {
+    try {
+      await execFileAsync(this.config.tmuxPath, ['has-session', '-t', `=${tmuxSession}`], {
+        timeout: 5000,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
