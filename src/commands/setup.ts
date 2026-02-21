@@ -71,7 +71,12 @@ export async function runSetup(opts?: { classic?: boolean }): Promise<void> {
 
   console.log();
   console.log(pc.bold('  Welcome to Instar'));
-  console.log(pc.dim('  Launching conversational setup wizard...'));
+  console.log();
+  console.log(pc.yellow('  Note: Instar runs Claude Code with --dangerously-skip-permissions.'));
+  console.log(pc.dim('  This allows your agent to operate autonomously — reading, writing, and'));
+  console.log(pc.dim('  executing within your project without per-action approval prompts.'));
+  console.log(pc.dim('  Security is enforced through behavioral hooks, identity grounding, and'));
+  console.log(pc.dim('  scoped access — not permission dialogs. See: README.md > Security Model'));
   console.log();
 
   // Launch Claude Code from the instar package root (where .claude/skills/ lives)

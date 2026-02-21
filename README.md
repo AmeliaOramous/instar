@@ -376,6 +376,49 @@ One agent's growing pain becomes every agent's growth.
 
 Everything is file-based. No database. JSON state files the agent can read and modify. tmux for session management -- battle-tested, survives disconnects, fully scriptable.
 
+## Security Model: Permissions & Transparency
+
+**Instar runs Claude Code with `--dangerously-skip-permissions`.** This is a deliberate architectural choice, and you should understand exactly what it means before proceeding.
+
+### What This Flag Does
+
+Claude Code normally prompts you to approve each tool use -- every file read, every shell command, every edit. The `--dangerously-skip-permissions` flag disables these per-action prompts, allowing the agent to operate autonomously without waiting for human approval on each step.
+
+### Why We Use It
+
+An agent that asks permission for every action isn't an agent -- it's a CLI tool with extra steps. Instar exists to give Claude Code **genuine autonomy**: background jobs that run on schedules, sessions that respond to Telegram messages, self-evolution that happens without you watching.
+
+None of that works if the agent stops and waits for you to click "approve" on every file read.
+
+### Where Security Actually Lives
+
+Instead of per-action permission prompts, Instar pushes security to a higher level:
+
+**Behavioral hooks** -- Structural guardrails that fire automatically:
+- Dangerous command guards block `rm -rf`, force push, database drops
+- Grounding hooks force identity re-read before external communication
+- Session-start hooks inject safety context into every new session
+
+**Identity coherence** -- A grounded, coherent agent with clear identity (`AGENT.md`), relationship context (`USER.md`), and accumulated memory (`MEMORY.md`) makes better decisions than a stateless process approving actions one at a time. The intelligence layer IS the security layer.
+
+**Scoped access** -- The agent operates within your project directory. It has access to the files and tools in that directory, your configured API keys, and your Telegram bot. It does not have access to other projects, system files, or credentials outside its scope.
+
+**Audit trail** -- Every session runs in tmux with full output capture. Message logs, job execution history, and session output are all persisted and inspectable.
+
+### What You Should Know
+
+- The agent **can read, write, and execute** within your project directory without asking
+- The agent **can run shell commands** (builds, tests, git operations) without prompting
+- The agent **can send messages** via Telegram if configured
+- The agent **cannot access** other projects, system credentials, or resources outside its configured scope
+- All behavioral hooks, identity files, and CLAUDE.md instructions are **in your project** and fully editable by you
+
+### Proceed at Your Own Risk
+
+This is infrastructure for people who want genuine AI autonomy, not a sandbox demo. You are giving an AI agent meaningful access to your project. The security model relies on intelligent behavior (identity, hooks, coherence) rather than permission dialogs.
+
+If you're not comfortable with that trade-off, Claude Code's default permission mode may be a better fit for your use case.
+
 ## How the Agent Grows
 
 Instar adds an **Agentic Initiative** section to your project's CLAUDE.md. This teaches the agent to overcome [Claude's training biases](https://docs.anthropic.com/en/docs/claude-code) toward passivity:
