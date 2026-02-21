@@ -213,7 +213,7 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 **Scripts** — Reusable capabilities in \`.claude/scripts/\`.
 
 **Skills** — Reusable behavioral capabilities in \`.claude/skills/\`.
-- Create: Write a markdown file at \`.claude/skills/my-skill/skill.md\`
+- Create: Write a markdown file at \`.claude/skills/my-skill/SKILL.md\`
 - Invoke: \`/my-skill\` in any Claude Code session
 - Schedule: Reference in a job: \`{"execute": {"type": "skill", "value": "my-skill"}}\`
 - List all: \`ls .claude/skills/\`
@@ -229,17 +229,18 @@ Skills are markdown files that define reusable capabilities. Claude Code auto-di
 
 **How to create a skill:**
 1. Create a directory: \`.claude/skills/my-skill/\`
-2. Write the skill file: \`.claude/skills/my-skill/skill.md\`
-3. Start with frontmatter: \`name\`, \`description\` (for auto-invocation), \`user_invocable: true/false\`
+2. Write the skill file: \`.claude/skills/my-skill/SKILL.md\`
+3. Start with frontmatter: \`name\`, \`description\` (for auto-invocation), and \`user_invocable\` nested under \`metadata:\`
 4. Describe the behavior, steps, and any grounding requirements
 5. It's immediately available as \`/my-skill\` in the next session
 
-**Example skill** (\`.claude/skills/reflect/skill.md\`):
+**Example skill** (\`.claude/skills/reflect/SKILL.md\`):
 \`\`\`markdown
 ---
 name: reflect
 description: Analyze what was learned in the current session and persist insights to MEMORY.md
-user_invocable: true
+metadata:
+  user_invocable: "true"
 ---
 
 # /reflect

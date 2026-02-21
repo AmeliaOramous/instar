@@ -557,8 +557,8 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 
 **Scripts** — Create shell/python scripts in \`.claude/scripts/\` for reusable capabilities.
 
-**Skills** — Reusable behavioral capabilities in \`.claude/skills/\`. Skills are markdown files that Claude Code auto-discovers. Create a directory and skill.md file, and it becomes a slash command.
-- Create: \`.claude/skills/my-skill/skill.md\`
+**Skills** — Reusable behavioral capabilities in \`.claude/skills/\`. Skills are markdown files that Claude Code auto-discovers. Create a directory and SKILL.md file, and it becomes a slash command.
+- Create: \`.claude/skills/my-skill/SKILL.md\`
 - Invoke: \`/my-skill\` in any session
 - Schedule: Reference in a job: \`{"execute": {"type": "skill", "value": "my-skill"}}\`
 
@@ -567,8 +567,8 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 You create your own skills. When you recognize a repeated pattern — a multi-step workflow, a structured check, a complex behavior — capture it as a skill. Skills are just markdown files that describe a process. Claude Code auto-discovers them.
 
 **How to create a skill:**
-1. Create: \`.claude/skills/my-skill/skill.md\`
-2. Add frontmatter: \`name\`, \`description\`, \`user_invocable: true/false\`
+1. Create: \`.claude/skills/my-skill/SKILL.md\`
+2. Add frontmatter: \`name\`, \`description\`, and \`user_invocable\` nested under \`metadata:\`
 3. Describe the behavior in clear steps
 4. It's available as \`/my-skill\` in the next session
 
