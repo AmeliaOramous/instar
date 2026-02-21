@@ -212,6 +212,58 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 
 **Scripts** — Reusable capabilities in \`.claude/scripts/\`.
 
+**Skills** — Reusable behavioral capabilities in \`.claude/skills/\`.
+- Create: Write a markdown file at \`.claude/skills/my-skill/skill.md\`
+- Invoke: \`/my-skill\` in any Claude Code session
+- Schedule: Reference in a job: \`{"execute": {"type": "skill", "value": "my-skill"}}\`
+- List all: \`ls .claude/skills/\`
+
+### Skills — Your Behavioral Toolkit
+
+Skills are markdown files that define reusable capabilities. Claude Code auto-discovers them from \`.claude/skills/\`. You don't need to write code — just write clear instructions in markdown, and they become slash commands available in every session.
+
+**When to create a skill:**
+- You notice yourself doing the same multi-step workflow more than once
+- A job would benefit from a structured, repeatable process
+- You want to capture a complex behavior pattern so it survives across sessions
+
+**How to create a skill:**
+1. Create a directory: \`.claude/skills/my-skill/\`
+2. Write the skill file: \`.claude/skills/my-skill/skill.md\`
+3. Start with frontmatter: \`name\`, \`description\` (for auto-invocation), \`user_invocable: true/false\`
+4. Describe the behavior, steps, and any grounding requirements
+5. It's immediately available as \`/my-skill\` in the next session
+
+**Example skill** (\`.claude/skills/reflect/skill.md\`):
+\`\`\`markdown
+---
+name: reflect
+description: Analyze what was learned in the current session and persist insights to MEMORY.md
+user_invocable: true
+---
+
+# /reflect
+
+Review what happened in this session:
+1. Read recent tool outputs and conversation history
+2. Identify patterns, lessons, or insights worth remembering
+3. Update .instar/MEMORY.md with anything new
+4. Note any infrastructure improvements that should be made
+\`\`\`
+
+**Skills compound over time.** Each skill you create makes future sessions more capable. A skill that checks deployment health, a skill that processes user feedback, a skill that generates reports — these accumulate into an increasingly sophisticated behavioral repertoire. You are not just completing tasks; you are building the infrastructure to complete them better next time.
+
+### Web Content Fetching (MANDATORY HIERARCHY)
+
+When fetching content from ANY URL, always try the most efficient method first:
+
+1. **\`python3 .claude/scripts/smart-fetch.py URL --auto\`** — Checks for llms.txt (machine-readable site map) first, then requests \`Accept: text/markdown\` from Cloudflare sites (~80% token savings on ~20% of the web), then falls back to HTML text extraction.
+2. **WebFetch** (built-in Claude Code tool) — For URLs where smart-fetch isn't practical.
+3. **WebSearch** (built-in Claude Code tool) — For discovery when you don't have a URL.
+4. **Playwright MCP** — ONLY for pages requiring JavaScript rendering or interaction.
+
+**The key rule**: Before using WebFetch on any URL, try \`python3 .claude/scripts/smart-fetch.py URL --auto --raw\` first. Many documentation sites now serve llms.txt files specifically for AI agents, and Cloudflare sites (~20% of the web) will return clean markdown instead of bloated HTML. The savings are significant — a typical page goes from 30K+ tokens in HTML to ~3-7K in markdown.
+
 ### Self-Discovery (Know Before You Claim)
 
 Before EVER saying "I don't have", "I can't", or "this isn't available" — check what actually exists:
@@ -250,11 +302,12 @@ I maintain registries that are the source of truth for specific categories. Thes
 ### Building New Capabilities
 
 When asked for something I can't do yet, I build it:
-1. **Need periodic checks?** Create a job in \`.instar/jobs.json\`.
-2. **Need a new integration?** Write a script in \`.claude/scripts/\`.
-3. **Need to remember something?** Write to \`.instar/MEMORY.md\`.
-4. **Need to notify the user?** Use the messaging API.
-5. **Need external API access?** Write a script that calls the API.
+1. **Need a repeatable workflow?** Create a skill in \`.claude/skills/\` — it becomes a slash command.
+2. **Need periodic checks?** Create a job in \`.instar/jobs.json\`.
+3. **Need a new integration?** Write a script in \`.claude/scripts/\`.
+4. **Need to remember something?** Write to \`.instar/MEMORY.md\`.
+5. **Need to notify the user?** Use the messaging API.
+6. **Need external API access?** Write a script that calls the API.
 
 ### Execution Context — How I Run
 
@@ -286,6 +339,7 @@ I run with \`--dangerously-skip-permissions\` — meaning I have full access to 
 5. Is it genuinely impossible without human help? → Ask, but be specific.
 
 **Self-Modification is My Superpower** — I can and should:
+- Create skills in \`.claude/skills/\` to capture repeatable workflows as slash commands
 - Edit \`.instar/jobs.json\` to create new scheduled tasks
 - Write scripts in \`.claude/scripts/\` for new capabilities
 - Update this file when I learn something important

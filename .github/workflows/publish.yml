@@ -2,35 +2,72 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+
+# Only one publish at a time
+concurrency:
+  group: publish
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish
+  ci:
+    name: CI Gate
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-          registry-url: 'https://registry.npmjs.org'
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - run: npm ci
+      - run: npm run lint
       - run: npm test
       - run: npm run build
-      - name: Publish to npm
+
+  publish:
+    name: Bump & Publish
+    needs: ci
+    runs-on: ubuntu-latest
+    # Skip version-bump commits to prevent infinite loop
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Bump patch version
+        id: bump
         run: |
-          # Check if this version is already published
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view "instar@${PACKAGE_VERSION}" version 2>/dev/null || echo "")
-          if [ "$PUBLISHED" = "$PACKAGE_VERSION" ]; then
-            echo "Version ${PACKAGE_VERSION} is already published. Skipping."
-          else
-            npm publish --provenance --access public
-          fi
+          CURRENT=$(node -p "require('./package.json').version")
+          npm version patch --no-git-tag-version
+          NEW=$(node -p "require('./package.json').version")
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "Bumped $CURRENT → $NEW"
+
+      - name: Publish to npm
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Commit version bump & tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: release v${{ steps.bump.outputs.version }} [skip ci]"
+          git tag "v${{ steps.bump.outputs.version }}"
+          git push origin main --tags

@@ -158,7 +158,7 @@ Some claims are less proven: iOS app is "internal preview." Voice wake docs retu
 
 ### Where Instar leads
 
-**Runtime depth.** Each session is a full Claude Code instance -- extended thinking, native tools, sub-agents, MCP servers. Not an API wrapper.
+**Runtime depth.** Each session is a full Claude Code instance -- extended thinking, native tools, sub-agents, MCP servers. Not an API wrapper. Agents ship with smart web conventions out of the box -- checking `llms.txt` and requesting Cloudflare markdown before falling back to raw HTML, cutting token costs by up to 80%.
 
 **Multi-session orchestration.** Multiple parallel jobs, each an independent Claude Code process with its own context and tools.
 
@@ -171,6 +171,28 @@ Some claims are less proven: iOS app is "internal preview." Voice wake docs retu
 Different tools for different needs. But only one of them works today.
 
 > Full comparison: [positioning-vs-openclaw.md](docs/positioning-vs-openclaw.md)
+
+---
+
+## What Powers Your Agent
+
+Your agent runs inside real Claude Code sessions. That means it inherits — automatically, invisibly — every capability Anthropic has built into Claude Code. Instar amplifies each one. The user just talks to their agent and gets results.
+
+| What happens invisibly | Claude Code provides | Instar amplifies |
+|------------------------|---------------------|-----------------|
+| Long sessions don't crash | Auto-compaction manages context | Identity hooks re-inject who the agent is after every compaction |
+| Costs stay reasonable | Prompt caching (90% savings on repeated content) | Cache-friendly architecture: stable CLAUDE.md, consistent job prompts |
+| Complex tasks get deep reasoning | Extended thinking across model tiers | Per-job model routing: Opus for complex work, Haiku for routine checks |
+| Risky commands don't cause damage | File checkpoints before every edit | Three-layer safety: catastrophic commands blocked, risky commands self-verified, edits reversible |
+| Research happens naturally | Built-in web search and fetch | Domain-aware searching, result synthesis, automatic Telegram relay |
+| Multiple things happen at once | Subagent spawning for parallel work | Context propagation — subagents inherit the agent's identity and project awareness |
+| The agent builds its own tools | Bash execution, file system access | Self-authored scripts and skills that accumulate across sessions |
+| Budget doesn't spiral | Token tracking per session | Quota-aware scheduling: automatic throttling when approaching limits |
+| New Anthropic features just work | Model and capability upgrades | Zero integration work — every upgrade benefits every agent immediately |
+
+**The user never sees any of this.** They have a conversation with their agent. The agent remembers what it learned last week, runs jobs while they sleep, creates its own tools when it needs them, and gets better over time. The complexity exists so the experience can be simple.
+
+> Full technical breakdown: [Inherited Advantages](docs/research/instar/claude-code-inherited-advantages.md)
 
 ---
 
@@ -359,7 +381,7 @@ One agent's growing pain becomes every agent's growth.
   logs/                   # Server logs
 .claude/                  # Claude Code configuration
   settings.json           # Hook registrations
-  scripts/                # Health watchdog, Telegram relay
+  scripts/                # Health watchdog, Telegram relay, smart-fetch
 ```
 
 Everything is file-based. No database. JSON state files the agent can read and modify. tmux for session management -- battle-tested, survives disconnects, fully scriptable.

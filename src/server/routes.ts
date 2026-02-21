@@ -796,6 +796,71 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ context });
   });
 
+  // Import relationships from Portal people-registry export (PROP-166)
+  router.post('/relationships/import', (req, res) => {
+    if (!ctx.relationships) {
+      res.status(503).json({ error: 'Relationships not configured' });
+      return;
+    }
+
+    const records = req.body;
+    if (!Array.isArray(records)) {
+      res.status(400).json({ error: 'Expected a JSON array of relationship records' });
+      return;
+    }
+
+    let created = 0;
+    let updated = 0;
+    let skipped = 0;
+
+    for (const rec of records) {
+      const name = rec?.name as string;
+      const channels = (rec?.channels || []) as Array<{ type: string; identifier: string }>;
+      if (!name || !channels.length) {
+        skipped++;
+        continue;
+      }
+
+      // Try to resolve by any channel
+      let existing = null;
+      for (const channel of channels) {
+        existing = ctx.relationships!.resolveByChannel(channel);
+        if (existing) break;
+      }
+
+      if (existing) {
+        for (const channel of channels) {
+          ctx.relationships!.linkChannel(existing.id, channel);
+        }
+        const importNotes = rec.notes as string | undefined;
+        if (importNotes && importNotes.length > (existing.notes || '').length) {
+          ctx.relationships!.updateNotes(existing.id, importNotes);
+        }
+        updated++;
+      } else {
+        const record = ctx.relationships!.findOrCreate(name, channels[0]);
+        for (let i = 1; i < channels.length; i++) {
+          ctx.relationships!.linkChannel(record.id, channels[i]);
+        }
+        if (rec.notes) {
+          ctx.relationships!.updateNotes(record.id, rec.notes as string);
+        }
+        const themes = (rec.themes || []) as string[];
+        if (themes.length > 0) {
+          ctx.relationships!.recordInteraction(record.id, {
+            timestamp: new Date().toISOString(),
+            channel: channels[0].type,
+            summary: `Imported from Portal people-registry with ${themes.length} themes`,
+            topics: themes,
+          });
+        }
+        created++;
+      }
+    }
+
+    res.json({ ok: true, created, updated, skipped, total: created + updated });
+  });
+
   // ── Feedback ────────────────────────────────────────────────────
 
   router.post('/feedback', async (req, res) => {

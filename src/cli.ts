@@ -13,6 +13,9 @@
  *   instar user add                # Add a user profile
  *   instar job add                 # Add a job definition
  *   instar job list                # List all jobs
+ *   instar relationship list       # List tracked relationships
+ *   instar relationship import     # Import from Portal people-registry
+ *   instar relationship export     # Export for Portal import
  *   instar add telegram            # Add Telegram messaging adapter
  */
 
@@ -25,6 +28,7 @@ import { startServer, stopServer } from './commands/server.js';
 import { showStatus } from './commands/status.js';
 import { addUser, listUsers } from './commands/user.js';
 import { addJob, listJobs } from './commands/job.js';
+import { listRelationships, importRelationships, exportRelationships } from './commands/relationship.js';
 import pc from 'picocolors';
 import { getInstarVersion } from './core/Config.js';
 import { listInstances } from './core/PortRegistry.js';
@@ -421,6 +425,32 @@ userCmd
   .description('List all users')
   .option('-d, --dir <path>', 'Project directory')
   .action(listUsers);
+
+// ── Relationship ─────────────────────────────────────────────────
+
+const relCmd = program
+  .command('relationship')
+  .description('Manage relationship records (PROP-166)');
+
+relCmd
+  .command('list')
+  .description('List all tracked relationships')
+  .option('--sort <by>', 'Sort by: significance, recent, name', 'significance')
+  .action(listRelationships);
+
+relCmd
+  .command('import')
+  .description('Import relationships from Portal people-registry export')
+  .requiredOption('--file <path>', 'Path to Portal export JSON file')
+  .option('--dry-run', 'Preview what would be imported without making changes')
+  .action(importRelationships);
+
+relCmd
+  .command('export')
+  .description('Export relationships for Portal import')
+  .option('--file <path>', 'Output file path (stdout if omitted)')
+  .option('--min-significance <n>', 'Minimum significance (1-10) to include', '0')
+  .action(exportRelationships);
 
 // ── Job ───────────────────────────────────────────────────────────
 
