@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { initProject } from './commands/init.js';
-import { runSetup } from './commands/setup.js';
+// setup.ts is imported dynamically — it depends on @inquirer/prompts which requires Node 20.12+
 import { startServer, stopServer } from './commands/server.js';
 import { showStatus } from './commands/status.js';
 import { addUser, listUsers } from './commands/user.js';
@@ -270,7 +270,17 @@ program
   .description('Persistent autonomy infrastructure for AI agents')
   .version(getInstarVersion())
   .option('--classic', 'Use the classic inquirer-based setup wizard instead of Claude')
-  .action((opts) => runSetup(opts)); // Default: run interactive setup when no subcommand given
+  .action(async (opts) => {
+    const [major, minor] = process.versions.node.split('.').map(Number);
+    if (major < 20 || (major === 20 && minor < 12)) {
+      console.error(`\n  Instar setup requires Node.js 20.12 or later.`);
+      console.error(`  You're running Node.js ${process.versions.node}.`);
+      console.error(`\n  Upgrade: https://nodejs.org/en/download\n`);
+      process.exit(1);
+    }
+    const { runSetup } = await import('./commands/setup.js');
+    return runSetup(opts);
+  }); // Default: run interactive setup when no subcommand given
 
 // ── Setup (explicit alias) ────────────────────────────────────────
 
@@ -278,7 +288,17 @@ program
   .command('setup')
   .description('Interactive setup wizard (same as running `instar` with no args)')
   .option('--classic', 'Use the classic inquirer-based setup wizard instead of Claude')
-  .action((opts) => runSetup(opts));
+  .action(async (opts) => {
+    const [major, minor] = process.versions.node.split('.').map(Number);
+    if (major < 20 || (major === 20 && minor < 12)) {
+      console.error(`\n  Instar setup requires Node.js 20.12 or later.`);
+      console.error(`  You're running Node.js ${process.versions.node}.`);
+      console.error(`\n  Upgrade: https://nodejs.org/en/download\n`);
+      process.exit(1);
+    }
+    const { runSetup } = await import('./commands/setup.js');
+    return runSetup(opts);
+  });
 
 // ── Init ─────────────────────────────────────────────────────────
 
