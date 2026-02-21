@@ -412,6 +412,42 @@ Instar has a built-in feedback loop that connects all agents to the development 
 
 **User feedback matters too.** When your user says "this isn't working" or "I wish I could..." — that's feedback. Categorize it and submit it the same way.
 
+### Evolution System
+
+You have a built-in evolution system with four subsystems. This is not a metaphor — it's infrastructure that tracks your growth.
+
+**Evolution Queue** — Staged self-improvement proposals.
+- View: \`curl http://localhost:${port}/evolution/proposals\`
+- Propose: \`/evolve\` skill or \`POST /evolution/proposals\`
+- The \`evolution-review\` job evaluates and implements proposals every 6 hours.
+
+**Learning Registry** — Structured, searchable insights.
+- View: \`curl http://localhost:${port}/evolution/learnings\`
+- Record: \`/learn\` skill or \`POST /evolution/learnings\`
+- The \`insight-harvest\` job synthesizes patterns into proposals every 8 hours.
+
+**Capability Gaps** — Track what you're missing.
+- View: \`curl http://localhost:${port}/evolution/gaps\`
+- Report: \`/gaps\` skill or \`POST /evolution/gaps\`
+
+**Action Queue** — Commitments with follow-through tracking.
+- View: \`curl http://localhost:${port}/evolution/actions\`
+- Create: \`/commit-action\` skill or \`POST /evolution/actions\`
+- The \`commitment-check\` job surfaces overdue items every 4 hours.
+
+**Dashboard** — Full evolution health at a glance:
+\`\`\`bash
+curl http://localhost:${port}/evolution
+\`\`\`
+
+**Skills for evolution:**
+- \`/evolve\` — Propose an improvement
+- \`/learn\` — Record an insight
+- \`/gaps\` — Report a missing capability
+- \`/commit-action\` — Track a commitment
+
+**The principle:** Evolution is not a separate activity from work. Every task is an opportunity to notice what could be better. The post-action reflection hook reminds you to pause after significant actions (commits, deploys) and consider what you learned. Most learning is lost because nobody paused to ask.
+
 ### Self-Evolution
 
 Record what I learn. Build infrastructure, not one-offs. Grow to meet the user's needs. Every session should leave things slightly better than I found them.

@@ -54,7 +54,7 @@ import Layout from '../layouts/Layout.astro';
       <div class="animate-fade-in-up animate-delay-300">
         <div class="inline-flex items-center gap-3 bg-slate-800/60 border border-slate-700/50 rounded-lg px-5 py-3 font-mono text-sm sm:text-base group cursor-pointer hover:border-teal-500/30 transition-colors" id="install-cmd">
           <span class="text-slate-500 select-none">$</span>
-          <span class="text-teal-300">npm install -g instar</span>
+          <span class="text-teal-300">npx instar</span>
           <button class="text-slate-500 hover:text-teal-400 transition-colors ml-2" title="Copy to clipboard" aria-label="Copy install command">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
           </button>
@@ -62,7 +62,7 @@ import Layout from '../layouts/Layout.astro';
       </div>
 
       <p class="text-sm text-slate-500 mt-4 animate-fade-in-up animate-delay-400">
-        Every molt, more autonomous.
+        One command. Full setup. Every molt, more autonomous.
       </p>
     </div>
   </section>
@@ -333,6 +333,50 @@ curl -X POST localhost:4040/sessions/research/input \\
   config.json   # Server & scheduler config
   jobs.json     # Scheduled tasks`}</code></pre>
           </div>
+        </div>
+
+        <!-- Evolution System -->
+        <div class="group rounded-xl border border-slate-800 bg-slate-900/40 p-8 hover:border-teal-500/20 transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-teal-500/10 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-slate-100 mb-2">Evolution System</h3>
+          <p class="text-slate-400 text-sm leading-relaxed mb-4">
+            Four subsystems that turn running into growing. Proposal queue for staged improvements,
+            learning registry for structured insights, gap tracking for missing capabilities,
+            and action queue for commitment follow-through.
+          </p>
+          <div class="rounded-lg border border-slate-700/50 bg-slate-800/40 p-4 space-y-2 text-xs">
+            <div class="flex items-center justify-between">
+              <span class="text-teal-300 font-mono">/evolve</span>
+              <span class="text-slate-500">Propose improvements</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-teal-300 font-mono">/learn</span>
+              <span class="text-slate-500">Record insights</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-teal-300 font-mono">/gaps</span>
+              <span class="text-slate-500">Track missing capabilities</span>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-teal-300 font-mono">/commit-action</span>
+              <span class="text-slate-500">Track commitments</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Relationships -->
+        <div class="group rounded-xl border border-slate-800 bg-slate-900/40 p-8 hover:border-teal-500/20 transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-teal-500/10 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-slate-100 mb-2">Relationship Tracking</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Every person your agent interacts with gets a relationship record that grows over time.
+            Cross-platform identity resolution, significance scoring, context injection, and stale detection.
+            The agent <em>knows</em> who it's talking to before the conversation starts.
+          </p>
         </div>
       </div>
     </div>
@@ -697,41 +741,20 @@ curl -X POST localhost:4040/sessions/research/input \\
             <div class="w-px h-full bg-slate-800 mt-2"></div>
           </div>
           <div class="pb-6">
-            <p class="text-slate-200 font-medium mb-3">Install</p>
+            <p class="text-slate-200 font-medium mb-2">Run one command</p>
+            <p class="text-slate-500 text-sm mb-3">Installs everything, walks you through setup, configures the server, optionally sets up Telegram, creates your first job, and starts it all.</p>
             <div class="terminal text-sm">
               <div class="terminal-header">
                 <div class="terminal-dot bg-red-400/60"></div>
                 <div class="terminal-dot bg-teal-400/60"></div>
                 <div class="terminal-dot bg-green-400/60"></div>
               </div>
-              <pre class="p-4 text-slate-300"><code><span class="text-slate-500">$</span> <span class="text-teal-300">npm install -g instar</span></code></pre>
+              <pre class="p-4 text-slate-300"><code><span class="text-slate-500">$</span> <span class="text-teal-300">npx instar</span></code></pre>
             </div>
           </div>
         </div>
 
         <!-- Step 2 -->
-        <div class="flex gap-6">
-          <div class="flex flex-col items-center">
-            <div class="w-8 h-8 rounded-full bg-teal-500/10 border border-teal-500/20 flex items-center justify-center shrink-0">
-              <span class="text-teal-400 font-bold text-sm">2</span>
-            </div>
-            <div class="w-px h-full bg-slate-800 mt-2"></div>
-          </div>
-          <div class="pb-6">
-            <p class="text-slate-200 font-medium mb-2">Run the setup wizard</p>
-            <p class="text-slate-500 text-sm mb-3">Detects your project, configures the server, optionally sets up Telegram, creates your first job, and starts everything.</p>
-            <div class="terminal text-sm">
-              <div class="terminal-header">
-                <div class="terminal-dot bg-red-400/60"></div>
-                <div class="terminal-dot bg-teal-400/60"></div>
-                <div class="terminal-dot bg-green-400/60"></div>
-              </div>
-              <pre class="p-4 text-slate-300"><code><span class="text-slate-500">$</span> <span class="text-teal-300">instar</span></code></pre>
-            </div>
-          </div>
-        </div>
-
-        <!-- Step 3 -->
         <div class="flex gap-6">
           <div class="flex flex-col items-center">
             <div class="w-8 h-8 rounded-full bg-green-500/10 border border-green-500/20 flex items-center justify-center shrink-0">
@@ -872,6 +895,28 @@ curl -X POST localhost:4040/sessions/research/input \\
             <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">haiku</span>
           </div>
         </div>
+
+        <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
+          <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
+            <span class="text-slate-200 text-sm font-medium font-mono">evolution-review</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-slate-500 text-xs">every 6h</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">sonnet</span>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
+          <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
+            <span class="text-slate-200 text-sm font-medium font-mono">commitment-check</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-slate-500 text-xs">every 4h</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">haiku</span>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -964,7 +1009,7 @@ curl -X POST localhost:4040/sessions/research/input \\
 
       <div class="inline-flex items-center gap-3 bg-slate-800/60 border border-teal-500/20 rounded-lg px-6 py-4 font-mono text-base sm:text-lg group cursor-pointer hover:border-teal-500/40 transition-colors glow-teal" id="install-cmd-bottom">
         <span class="text-slate-500 select-none">$</span>
-        <span class="text-teal-300">npm install -g instar</span>
+        <span class="text-teal-300">npx instar</span>
         <button class="text-slate-500 hover:text-teal-400 transition-colors ml-2" title="Copy to clipboard" aria-label="Copy install command">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
         </button>
@@ -1004,7 +1049,7 @@ curl -X POST localhost:4040/sessions/research/input \\
     document.querySelectorAll('#install-cmd, #install-cmd-bottom').forEach(el => {
       el.addEventListener('click', async () => {
         try {
-          await navigator.clipboard.writeText('npm install -g instar');
+          await navigator.clipboard.writeText('npx instar');
           const btn = el.querySelector('button');
           if (btn) {
             btn.innerHTML = '<svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>';

@@ -95,6 +95,7 @@ instar feedback --type bug --title "Session timeout" --description "Details..."
 - **[Identity System](#identity-that-survives-context-death)** -- AGENT.md + USER.md + MEMORY.md with hooks that enforce continuity across compaction.
 - **[Telegram Integration](#telegram-integration)** -- Two-way messaging. Each job gets its own topic. Your group becomes a living dashboard.
 - **[Relationship Tracking](#relationships-as-fundamental-infrastructure)** -- Cross-platform identity resolution, significance scoring, context injection.
+- **[Evolution System](#evolution-system)** -- Four subsystems for structured growth: proposal queue, learning registry, gap tracking, and commitment follow-through.
 - **[Self-Evolution](#self-evolution)** -- The agent modifies its own jobs, hooks, skills, and infrastructure. It builds what it needs.
 - **[Behavioral Hooks](#behavioral-hooks)** -- Structural guardrails: identity injection, dangerous command guards, grounding before messaging.
 - **[Default Coherence Jobs](#default-coherence-jobs)** -- Health checks, reflection, relationship maintenance. A circadian rhythm out of the box.
@@ -285,6 +286,20 @@ The server runs 24/7 in the background, surviving terminal disconnects and auto-
 | GET | `/telegram/topics` | List topic-session mappings |
 | POST | `/telegram/reply/:topicId` | Send message to a topic |
 | GET | `/telegram/topics/:topicId/messages` | Topic message history (`?limit=20`) |
+| GET | `/evolution` | Full evolution dashboard |
+| GET | `/evolution/proposals` | List proposals (`?status=`, `?type=`) |
+| POST | `/evolution/proposals` | Create a proposal |
+| PATCH | `/evolution/proposals/:id` | Update proposal status |
+| GET | `/evolution/learnings` | List learnings (`?applied=`, `?category=`) |
+| POST | `/evolution/learnings` | Record a learning |
+| PATCH | `/evolution/learnings/:id/apply` | Mark learning applied |
+| GET | `/evolution/gaps` | List capability gaps |
+| POST | `/evolution/gaps` | Report a gap |
+| PATCH | `/evolution/gaps/:id/address` | Mark gap addressed |
+| GET | `/evolution/actions` | List action items |
+| POST | `/evolution/actions` | Create an action item |
+| GET | `/evolution/actions/overdue` | List overdue actions |
+| PATCH | `/evolution/actions/:id` | Update action status |
 
 ### Identity That Survives Context Death
 
@@ -312,6 +327,28 @@ Every person the agent interacts with gets a relationship record that grows over
 - **Context injection** -- The agent *knows* who it's talking to before the conversation starts
 - **Stale detection** -- Surfaces relationships that haven't been contacted in a while
 
+### Evolution System
+
+Self-evolution isn't just "the agent can edit files." It's a structured system with four subsystems that turn running into growing:
+
+**Evolution Queue** -- Staged self-improvement proposals. The agent identifies something that could be better, proposes a change, and a review job evaluates and implements it. Not impulsive self-modification -- deliberate, staged improvement with a paper trail.
+
+**Learning Registry** -- Structured, searchable insights. When the agent discovers a pattern, solves a tricky problem, or learns a user preference, it records it in a format that future sessions can query. An insight-harvest job synthesizes patterns across learnings into evolution proposals.
+
+**Capability Gap Tracker** -- The agent tracks what it's missing. When it can't fulfill a request, encounters a limitation, or notices a workflow gap, it records the gap with severity and a proposed solution. This is the difference between "I can't do that" and "I can't do that *yet*, and here's what I need."
+
+**Action Queue** -- Commitment tracking with stale detection. When the agent promises to follow up, creates a TODO, or identifies work that needs doing, it gets tracked. A commitment-check job surfaces overdue items so nothing falls through the cracks.
+
+Built-in skills (`/evolve`, `/learn`, `/gaps`, `/commit-action`) make recording effortless. A post-action reflection hook nudges the agent to pause after significant actions (commits, deploys) and consider what it learned. Three default jobs drive the cycle:
+
+| Job | Schedule | Purpose |
+|-----|----------|---------|
+| **evolution-review** | Every 6h | Review proposals, implement approved ones |
+| **insight-harvest** | Every 8h | Synthesize learnings into proposals |
+| **commitment-check** | Every 4h | Surface overdue action items |
+
+All state is file-based JSON in `.instar/state/evolution/`. No database, no external dependencies.
+
 ### Self-Evolution
 
 The agent can edit its own job definitions, write new scripts, update its identity, create hooks, and modify its configuration. When asked to do something it can't do yet, the expected behavior is: **"Let me build that capability."**
@@ -331,8 +368,11 @@ Automatic hooks fire via Claude Code's hook system:
 |------|------|-------------|
 | **Dangerous command guard** | PreToolUse (blocking) | Blocks destructive operations structurally |
 | **Grounding before messaging** | PreToolUse (advisory) | Forces identity re-read before external communication |
-| **Session start** | PostToolUse | Injects identity context at session start |
-| **Compaction recovery** | Notification (compact) | Restores identity when context compresses |
+| **Deferral detector** | PreToolUse (advisory) | Catches the agent deferring work it could do itself |
+| **External communication guard** | PreToolUse (advisory) | Identity grounding before posting to external platforms |
+| **Post-action reflection** | PreToolUse (advisory) | Nudges learning capture after commits, deploys, and significant actions |
+| **Session start** | SessionStart | Injects identity context at session start |
+| **Compaction recovery** | SessionStart (compact) | Restores identity when context compresses |
 
 ### Default Coherence Jobs
 
@@ -343,10 +383,15 @@ Ships out of the box:
 | **health-check** | Every 5 min | Haiku | Verify infrastructure health |
 | **reflection-trigger** | Every 4h | Sonnet | Reflect on recent work |
 | **relationship-maintenance** | Daily | Sonnet | Review stale relationships |
-| **update-check** | Daily | Haiku | Detect new Instar versions |
+| **update-check** | Every 30 min | Haiku | Detect new Instar versions |
 | **feedback-retry** | Every 6h | Haiku | Retry un-forwarded feedback items |
+| **dispatch-check** | Every 30 min | Haiku | Poll for intelligence dispatches |
+| **self-diagnosis** | Every 2h | Sonnet | Proactive infrastructure scanning |
+| **evolution-review** | Every 6h | Sonnet | Review and implement evolution proposals |
+| **insight-harvest** | Every 8h | Sonnet | Synthesize learnings into proposals |
+| **commitment-check** | Every 4h | Haiku | Surface overdue action items |
 
-These give the agent a **circadian rhythm** -- regular self-maintenance without user intervention.
+These give the agent a **circadian rhythm** -- regular self-maintenance, evolution, and growth without user intervention.
 
 ### The Feedback Loop: A Rising Tide Lifts All Ships
 
@@ -375,13 +420,15 @@ One agent's growing pain becomes every agent's growth.
   AGENT.md                # Agent identity (who am I?)
   USER.md                 # User context (who am I working with?)
   MEMORY.md               # Persistent learnings across sessions
-  hooks/                  # Behavioral scripts (guards, identity injection)
+  hooks/                  # Behavioral scripts (guards, identity injection, reflection)
   state/                  # Runtime state (sessions, jobs)
+    evolution/            # Evolution queue, learnings, gaps, actions (JSON)
   relationships/          # Per-person relationship files
   logs/                   # Server logs
 .claude/                  # Claude Code configuration
   settings.json           # Hook registrations
   scripts/                # Health watchdog, Telegram relay, smart-fetch
+  skills/                 # Built-in + agent-created skills (evolve, learn, gaps, commit-action)
 ```
 
 Everything is file-based. No database. JSON state files the agent can read and modify. tmux for session management -- battle-tested, survives disconnects, fully scriptable.

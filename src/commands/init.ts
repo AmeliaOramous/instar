@@ -238,10 +238,11 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   installSmartFetch(projectDir);
   console.log(`  ${pc.green('✓')} Created .claude/scripts/smart-fetch.py (agentic web conventions)`);
 
-  // Create .claude/skills/ directory for agent-created skills
+  // Create .claude/skills/ directory and install built-in skills
   const skillsDir = path.join(projectDir, '.claude', 'skills');
   fs.mkdirSync(skillsDir, { recursive: true });
-  console.log(`  ${pc.green('✓')} Created .claude/skills/ (agent skill directory)`);
+  installBuiltinSkills(skillsDir, port);
+  console.log(`  ${pc.green('✓')} Created .claude/skills/ (with built-in evolution skills)`);
 
   // Write CLAUDE.md (standalone version for fresh projects)
   const claudeMd = generateClaudeMd(projectName, identity.name, port, false);
@@ -456,10 +457,11 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   installSmartFetch(projectDir);
   console.log(pc.green('  Created:') + ' .claude/scripts/smart-fetch.py (agentic web conventions)');
 
-  // Create .claude/skills/ directory for agent-created skills
+  // Create .claude/skills/ directory and install built-in skills
   const skillsDir = path.join(projectDir, '.claude', 'skills');
   fs.mkdirSync(skillsDir, { recursive: true });
-  console.log(pc.green('  Created:') + ' .claude/skills/ (agent skill directory)');
+  installBuiltinSkills(skillsDir, port);
+  console.log(pc.green('  Created:') + ' .claude/skills/ (with built-in evolution skills)');
 
   // Append to .gitignore
   const gitignorePath = path.join(projectDir, '.gitignore');
@@ -648,6 +650,38 @@ Instar has a built-in feedback loop. When something isn't working, your user can
 - Report: \`curl -X POST http://localhost:${port}/feedback -d '{"issue":"description","context":"relevant logs"}'\`
 - Check updates: \`npm outdated -g instar\`
 
+### Evolution System
+
+You have a built-in evolution system with four subsystems. This is not a metaphor — it's infrastructure that tracks your growth.
+
+**Evolution Queue** — Staged self-improvement proposals.
+- View: \`curl http://localhost:${port}/evolution/proposals\`
+- Propose: \`/evolve\` skill or \`POST /evolution/proposals\`
+- The \`evolution-review\` job evaluates and implements proposals every 6 hours.
+
+**Learning Registry** — Structured, searchable insights.
+- View: \`curl http://localhost:${port}/evolution/learnings\`
+- Record: \`/learn\` skill or \`POST /evolution/learnings\`
+- The \`insight-harvest\` job synthesizes patterns into proposals every 8 hours.
+
+**Capability Gaps** — Track what you're missing.
+- View: \`curl http://localhost:${port}/evolution/gaps\`
+- Report: \`/gaps\` skill or \`POST /evolution/gaps\`
+
+**Action Queue** — Commitments with follow-through tracking.
+- View: \`curl http://localhost:${port}/evolution/actions\`
+- Create: \`/commit-action\` skill or \`POST /evolution/actions\`
+- The \`commitment-check\` job surfaces overdue items every 4 hours.
+
+**Dashboard** — Full evolution health:
+\`\`\`bash
+curl http://localhost:${port}/evolution
+\`\`\`
+
+**Skills:** \`/evolve\`, \`/learn\`, \`/gaps\`, \`/commit-action\`
+
+**The principle:** Evolution is not separate from work. Every task is an opportunity to notice what could be better. The post-action reflection hook reminds you to pause after significant actions and consider what you learned.
+
 ### Self-Evolution
 
 **Record what you learn.** When you discover a new pattern, solution, or capability — write it to \`.instar/MEMORY.md\`. The next session should benefit from what this session learned.
@@ -658,6 +692,232 @@ Instar has a built-in feedback loop. When something isn't working, your user can
 `;
 
   return section;
+}
+
+/**
+ * Install built-in skills for evolution system.
+ * Only writes skill files that don't already exist (preserves customizations).
+ */
+function installBuiltinSkills(skillsDir: string, port: number): void {
+  const skills: Record<string, { name: string; description: string; content: string }> = {
+    'evolve': {
+      name: 'evolve',
+      description: 'Propose an evolution improvement to your own infrastructure, behavior, or capabilities.',
+      content: `---
+name: evolve
+description: Propose an evolution improvement to your own infrastructure, behavior, or capabilities.
+metadata:
+  user_invocable: "true"
+---
+
+# /evolve
+
+Propose an evolution improvement. Use this when you identify something about yourself that could be better — a new capability, a workflow improvement, a behavioral pattern worth encoding, or infrastructure worth building.
+
+## Steps
+
+1. **Identify the improvement** — What did you notice? What triggered this? Be specific.
+2. **Classify it**:
+   - \`capability\` — New skill or ability
+   - \`infrastructure\` — System improvement (hooks, jobs, scripts)
+   - \`voice\` — Communication or tone improvement
+   - \`workflow\` — Process improvement
+   - \`philosophy\` — Principle or value update
+   - \`integration\` — New external connection
+   - \`performance\` — Speed or efficiency improvement
+3. **Assess impact and effort** (high/medium/low for each)
+4. **Submit the proposal**:
+
+\`\`\`bash
+curl -s -X POST http://localhost:${port}/evolution/proposals \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"TITLE","source":"WHERE_YOU_NOTICED","description":"WHAT_AND_WHY","type":"TYPE","impact":"medium","effort":"medium"}'
+\`\`\`
+
+5. **Check the dashboard** for context:
+
+\`\`\`bash
+curl -s http://localhost:${port}/evolution
+\`\`\`
+
+## When to Use
+
+- After completing a task in a way that felt unnecessarily difficult
+- When you notice a pattern you keep repeating manually
+- When a user request reveals a capability you should have but don't
+- When you find yourself working around a limitation
+- After reading about a technique or pattern that would improve your work
+
+## Philosophy
+
+Evolution is not a separate activity from work — it IS the work. Every task is an opportunity to notice what could be better. The best proposals come from real experience, not abstract planning.
+`,
+    },
+    'learn': {
+      name: 'learn',
+      description: 'Record a learning or insight in the structured learning registry.',
+      content: `---
+name: learn
+description: Record a learning or insight in the structured learning registry.
+metadata:
+  user_invocable: "true"
+---
+
+# /learn
+
+Record a learning or insight. Use this when you discover something worth remembering — a pattern, a solution, a mistake, or an observation that future sessions should know about.
+
+## Steps
+
+1. **Identify the learning** — What did you discover? What's the actionable insight?
+2. **Categorize it** (e.g., debugging, architecture, user-preference, integration, communication, workflow)
+3. **Tag it** for searchability
+4. **Submit**:
+
+\`\`\`bash
+curl -s -X POST http://localhost:${port}/evolution/learnings \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"TITLE","category":"CATEGORY","description":"FULL_INSIGHT","source":{"discoveredAt":"DATE","platform":"WHERE","session":"SESSION_ID"},"tags":["tag1","tag2"]}'
+\`\`\`
+
+5. **If it suggests an improvement**, note the evolution relevance:
+   - Add \`"evolutionRelevance": "This could become a skill/hook/job because..."\`
+   - The insight-harvest job will pick this up and potentially create a proposal
+
+## When to Use
+
+- After solving a tricky problem (capture the solution pattern)
+- After a user interaction reveals a preference you didn't know
+- After discovering a tool or technique that works well
+- After making a mistake (capture what went wrong and the fix)
+- After noticing a pattern across multiple tasks
+
+## Difference from MEMORY.md
+
+MEMORY.md is your personal scratchpad — unstructured, read by you.
+The learning registry is structured, searchable, and connected to the evolution system.
+Use MEMORY.md for quick notes. Use /learn for insights that should influence future behavior.
+`,
+    },
+    'gaps': {
+      name: 'gaps',
+      description: 'Report a capability gap — something you need but don\'t have.',
+      content: `---
+name: gaps
+description: Report a capability gap — something you need but don't have.
+metadata:
+  user_invocable: "true"
+---
+
+# /gaps
+
+Report a capability gap. Use this when you discover something you should be able to do but can't — a missing skill, knowledge area, integration, or workflow that would make you more effective.
+
+## Steps
+
+1. **Describe the gap** — What were you trying to do? What's missing?
+2. **Classify it**:
+   - \`skill\` — Missing ability (e.g., can't parse a specific format)
+   - \`knowledge\` — Missing information (e.g., don't know how a system works)
+   - \`integration\` — Missing connection (e.g., can't talk to a service)
+   - \`workflow\` — Missing process (e.g., no standard way to do X)
+   - \`communication\` — Missing voice capability (e.g., can't express X well)
+   - \`monitoring\` — Missing observability (e.g., can't detect when X happens)
+3. **Assess severity** (critical/high/medium/low)
+4. **Describe current state** — What do you do instead? What's the workaround?
+5. **Propose a solution** if you have one
+6. **Submit**:
+
+\`\`\`bash
+curl -s -X POST http://localhost:${port}/evolution/gaps \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"TITLE","category":"CATEGORY","severity":"medium","description":"WHAT_IS_MISSING","context":"WHEN_DID_YOU_NOTICE","currentState":"CURRENT_WORKAROUND","proposedSolution":"HOW_TO_FIX"}'
+\`\`\`
+
+## When to Use
+
+- When you can't fulfill a user request and have to say "I can't do that yet"
+- When you notice yourself repeatedly working around a limitation
+- When an integration you need doesn't exist
+- When you lack knowledge about a system you interact with
+- When monitoring would catch an issue before it becomes a problem
+
+## View Current Gaps
+
+\`\`\`bash
+curl -s http://localhost:${port}/evolution/gaps
+\`\`\`
+`,
+    },
+    'commit-action': {
+      name: 'commit-action',
+      description: 'Create a tracked action item — a commitment with follow-through tracking.',
+      content: `---
+name: commit-action
+description: Create a tracked action item — a commitment with follow-through tracking.
+metadata:
+  user_invocable: "true"
+---
+
+# /commit-action
+
+Create a tracked action item. Use this when you promise to do something, identify a task that needs follow-through, or want to ensure something doesn't fall through the cracks.
+
+## Steps
+
+1. **Define the action** — What needs to be done? Be specific and actionable.
+2. **Set priority** (critical/high/medium/low)
+3. **Set a due date** if applicable (ISO 8601 format)
+4. **Identify who/what you're committing to** (optional)
+5. **Submit**:
+
+\`\`\`bash
+curl -s -X POST http://localhost:${port}/evolution/actions \\
+  -H 'Content-Type: application/json' \\
+  -d '{"title":"TITLE","description":"WHAT_TO_DO","priority":"medium","dueBy":"2026-03-01T00:00:00Z","commitTo":"WHO_OR_WHAT","tags":["tag1"]}'
+\`\`\`
+
+6. **When complete**, mark it done:
+
+\`\`\`bash
+curl -s -X PATCH http://localhost:${port}/evolution/actions/ACT-XXX \\
+  -H 'Content-Type: application/json' \\
+  -d '{"status":"completed","resolution":"What was done"}'
+\`\`\`
+
+## When to Use
+
+- When you promise a user you'll follow up on something
+- When you identify a task during work that shouldn't be forgotten
+- When a learning or gap requires a specific action
+- When you need to check back on something later
+- When committing to implement an evolution proposal
+
+## View Actions
+
+\`\`\`bash
+# All pending actions
+curl -s http://localhost:${port}/evolution/actions?status=pending
+
+# Overdue actions
+curl -s http://localhost:${port}/evolution/actions/overdue
+\`\`\`
+
+## The Commitment Check
+
+The commitment-check job runs every 4 hours and surfaces overdue items. If you create an action and forget it, the system won't.
+`,
+    },
+  };
+
+  for (const [slug, skill] of Object.entries(skills)) {
+    const skillDir = path.join(skillsDir, slug);
+    const skillFile = path.join(skillDir, 'SKILL.md');
+    if (!fs.existsSync(skillFile)) {
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(skillFile, skill.content);
+    }
+  }
 }
 
 function getDefaultJobs(port: number): object[] {
@@ -789,6 +1049,92 @@ IMPORTANT for CI failures: Don't just report them as feedback — FIX THEM. Read
 If everything looks healthy, exit silently. Only report issues.`,
       },
       tags: ['coherence', 'default'],
+    },
+    {
+      slug: 'evolution-review',
+      name: 'Evolution Review',
+      description: 'Review pending evolution proposals, evaluate their merit, and implement approved ones.',
+      schedule: '0 */6 * * *',
+      priority: 'medium',
+      expectedDurationMinutes: 5,
+      model: 'sonnet',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/evolution/proposals?status=proposed 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if len(d.get('proposals',[])) > 0 else 1)"`,
+      execute: {
+        type: 'prompt',
+        value: `Review pending evolution proposals: curl -s http://localhost:${port}/evolution/proposals?status=proposed
+
+For each proposal:
+1. Read the title, description, type, and source
+2. Evaluate: Is this a genuine improvement? Is the effort worth the impact? Does it align with our goals?
+3. If approved, update status: curl -s -X PATCH http://localhost:${port}/evolution/proposals/EVO-XXX -H 'Content-Type: application/json' -d '{"status":"approved"}'
+4. Then implement it: create the skill/hook/job/config change described in the proposal
+5. After implementation, mark complete: curl -s -X PATCH http://localhost:${port}/evolution/proposals/EVO-XXX -H 'Content-Type: application/json' -d '{"status":"implemented","resolution":"What was done"}'
+
+If a proposal should be deferred or rejected, update with reason.
+
+Also check the dashboard: curl -s http://localhost:${port}/evolution — report any highlights to the user if they seem important.
+
+If no proposals need attention, exit silently.`,
+      },
+      tags: ['coherence', 'default', 'evolution'],
+    },
+    {
+      slug: 'insight-harvest',
+      name: 'Insight Harvest',
+      description: 'Synthesize learnings from the learning registry, detect patterns, and generate evolution proposals from high-confidence insights.',
+      schedule: '0 */8 * * *',
+      priority: 'low',
+      expectedDurationMinutes: 3,
+      model: 'sonnet',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/evolution/learnings?applied=false 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if len(d.get('learnings',[])) > 0 else 1)"`,
+      execute: {
+        type: 'prompt',
+        value: `Harvest and synthesize learnings: curl -s http://localhost:${port}/evolution/learnings?applied=false
+
+Review unapplied learnings and look for:
+1. **Patterns**: Multiple learnings pointing to the same conclusion
+2. **Actionable insights**: Learnings that suggest a specific change
+3. **Cross-domain connections**: Insights from one area that apply to another
+
+For each actionable pattern found, create an evolution proposal:
+curl -s -X POST http://localhost:${port}/evolution/proposals -H 'Content-Type: application/json' -d '{"title":"...","source":"insight-harvest from LRN-XXX","description":"...","type":"...","impact":"...","effort":"..."}'
+
+Then mark the relevant learnings as applied:
+curl -s -X PATCH http://localhost:${port}/evolution/learnings/LRN-XXX/apply -H 'Content-Type: application/json' -d '{"appliedTo":"EVO-XXX"}'
+
+Also update MEMORY.md with any patterns worth preserving long-term.
+
+If no actionable patterns found, exit silently.`,
+      },
+      tags: ['coherence', 'default', 'evolution'],
+    },
+    {
+      slug: 'commitment-check',
+      name: 'Commitment Check',
+      description: 'Track action items and commitments. Surface overdue items and stale commitments.',
+      schedule: '0 */4 * * *',
+      priority: 'low',
+      expectedDurationMinutes: 2,
+      model: 'haiku',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/evolution/actions/overdue 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if len(d.get('overdue',[])) > 0 else 1)"`,
+      execute: {
+        type: 'prompt',
+        value: `Check for overdue commitments: curl -s http://localhost:${port}/evolution/actions/overdue
+
+For each overdue action:
+1. Assess: Can this be completed now? Is it still relevant?
+2. If actionable, attempt to complete it or advance it
+3. If no longer relevant, cancel it: curl -s -X PATCH http://localhost:${port}/evolution/actions/ACT-XXX -H 'Content-Type: application/json' -d '{"status":"cancelled","resolution":"No longer relevant because..."}'
+4. If blocked, escalate to the user via Telegram (if configured)
+
+Also check pending actions (curl -s http://localhost:${port}/evolution/actions?status=pending) for items that have been pending more than 48 hours without a due date — these are forgotten commitments.
+
+If no overdue or stale items, exit silently.`,
+      },
+      tags: ['coherence', 'default', 'evolution'],
     },
   ];
 }
@@ -989,6 +1335,34 @@ curl -s -X POST http://localhost:${port}/feedback \\
 Types: \`bug\`, \`feature\`, \`improvement\`, \`question\`
 
 **Do not wait for the user to notice.** If a hook throws an error, report it. If a job fails, report it. If the server returns unexpected data, report it. You are not just using instar — you are part of its immune system.
+`);
+  }
+
+  // Check for Evolution System section
+  if (!content.includes('Evolution System')) {
+    additions.push(`
+### Evolution System
+
+You have a built-in evolution system with four subsystems that track your growth.
+
+**Evolution Queue** — Staged self-improvement proposals.
+- View: \`curl http://localhost:${port}/evolution/proposals\`
+- Propose: \`/evolve\` skill or \`POST /evolution/proposals\`
+
+**Learning Registry** — Structured, searchable insights.
+- View: \`curl http://localhost:${port}/evolution/learnings\`
+- Record: \`/learn\` skill or \`POST /evolution/learnings\`
+
+**Capability Gaps** — Track what you're missing.
+- View: \`curl http://localhost:${port}/evolution/gaps\`
+- Report: \`/gaps\` skill or \`POST /evolution/gaps\`
+
+**Action Queue** — Commitments with follow-through tracking.
+- View: \`curl http://localhost:${port}/evolution/actions\`
+- Create: \`/commit-action\` skill or \`POST /evolution/actions\`
+
+**Dashboard**: \`curl http://localhost:${port}/evolution\`
+**Skills**: \`/evolve\`, \`/learn\`, \`/gaps\`, \`/commit-action\`
 `);
   }
 
@@ -1253,6 +1627,56 @@ process.stdin.on('end', () => {
     ].join('\\n');
 
     process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: checklist }));
+  } catch { /* don't break on errors */ }
+  process.exit(0);
+});
+`, { mode: 0o755 });
+
+  // Post-action reflection — injects evolution awareness after significant actions.
+  // PreToolUse hook for Bash. When the agent is about to send a response or commit,
+  // it reminds them to consider what they learned. Advisory, not blocking.
+  fs.writeFileSync(path.join(hooksDir, 'post-action-reflection.js'), `#!/usr/bin/env node
+// Post-action reflection — evolution awareness after significant actions.
+// PreToolUse hook for Bash. When the agent is about to commit, deploy, or
+// complete a task, injects a brief reminder to capture learnings.
+//
+// "Every action is an opportunity to learn. Most of that learning is lost
+// because nobody paused to ask: what did this teach me?"
+
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(data);
+    if (input.tool_name !== 'Bash') process.exit(0);
+
+    const command = (input.tool_input || {}).command || '';
+    if (!command) process.exit(0);
+
+    // Significant action patterns — moments worth reflecting on
+    const significantPatterns = [
+      /git\\s+commit/i,
+      /git\\s+push/i,
+      /npm\\s+publish/i,
+      /curl\\s+-X\\s+POST.*\\/deploy/i,
+      /instar\\s+server\\s+restart/i,
+    ];
+
+    if (!significantPatterns.some(p => p.test(command))) process.exit(0);
+
+    const reminder = [
+      'POST-ACTION REFLECTION — Quick evolution check:',
+      '',
+      'Before moving on, consider:',
+      '- Did this teach you something worth recording? → /learn',
+      '- Did you notice a gap in your capabilities? → /gaps',
+      '- Did you discover an improvement opportunity? → /evolve',
+      '- Did you make a commitment to follow up? → /commit-action',
+      '',
+      'Skip if nothing notable. The value is in the pause, not the output.',
+    ].join('\\n');
+
+    process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: reminder }));
   } catch { /* don't break on errors */ }
   process.exit(0);
 });
@@ -1618,6 +2042,11 @@ function installClaudeSettings(projectDir: string): void {
     {
       type: 'command',
       command: 'node .instar/hooks/external-communication-guard.js',
+      timeout: 5000,
+    },
+    {
+      type: 'command',
+      command: 'node .instar/hooks/post-action-reflection.js',
       timeout: 5000,
     },
   ];
