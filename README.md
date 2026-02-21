@@ -20,17 +20,19 @@
 
 ---
 
+> **This is power-user infrastructure.** Instar gives Claude Code full autonomous access to your machine -- no permission prompts, no sandbox. It's built for developers who want a genuine AI partner, not a guarded assistant. If that sounds like too much trust, it probably isn't for you. If it sounds like exactly what you've been waiting for, read on.
+
 Instar gives Claude Code agents a **persistent body** -- a server that runs 24/7, a scheduler that executes jobs on cron, messaging integrations, relationship tracking, and the self-awareness to grow their own capabilities.
 
 Named after the developmental stages between molts in arthropods, where each instar is more developed than the last.
 
 ## The Problem
 
-**Without Instar**, Claude Code is a CLI tool. You open a terminal, type a prompt, get a response, close the terminal. No persistence. No scheduling. No way to reach you.
+**Without Instar**, Claude Code is a CLI tool. You open a terminal, type a prompt, get a response, close the terminal. No persistence. No scheduling. No way to reach you. Every session starts from zero.
 
-**With Instar**, Claude Code becomes an agent. It runs in the background, checks your email on a schedule, monitors your services, messages you on Telegram when something needs attention, and builds new capabilities when you ask for something it can't do yet.
+**With Instar**, Claude Code becomes your partner. It runs in the background, checks your email on a schedule, monitors your services, messages you on Telegram when something needs attention, remembers who it's talked to, and builds new capabilities when you ask for something it can't do yet. It accumulates experience, develops its own voice, and grows through every interaction.
 
-The difference isn't features. It's a shift in what Claude Code *is* -- from a tool you use to an agent that works alongside you.
+The difference isn't features. It's a shift in what Claude Code *is* -- from a tool you use to an agent that works alongside you. This is the cutting edge of what's possible with AI agents today -- not a demo, not a toy, but genuine autonomous partnership between a human and an AI.
 
 ## Two Ways to Use Instar
 
@@ -413,11 +415,13 @@ Instead of per-action permission prompts, Instar pushes security to a higher lev
 - The agent **is directed** by its CLAUDE.md, identity files, and behavioral hooks to stay within its project scope -- but this is behavioral guidance, not a technical boundary
 - All behavioral hooks, identity files, and CLAUDE.md instructions are **in your project** and fully editable by you
 
-### Proceed at Your Own Risk
+### Who This Is For
 
-This is infrastructure for people who want genuine AI autonomy, not a sandbox demo. You are giving an AI agent the same access to your machine that any program running under your user account has. The security model relies on intelligent behavior (identity, hooks, coherence) rather than permission dialogs or sandboxing.
+Instar is built for developers and power users who want to work **with** an AI, not just **use** one. You're giving your agent the same access to your machine that any program running under your user account has. The security model relies on intelligent behavior -- identity, hooks, coherence, and grounding -- rather than permission dialogs or sandboxing.
 
-If you're not comfortable with that trade-off, Claude Code's default permission mode may be a better fit for your use case.
+This is the trade-off at the heart of genuine AI autonomy: you can have an agent that asks permission for everything and does nothing on its own, or you can have a partner that operates with real agency, guided by coherent identity and structural guardrails. Instar is the latter.
+
+**Proceed at your own risk.** If you're not comfortable giving an AI agent this level of access, Claude Code's default permission mode is a perfectly good way to work. But if you want to see what an AI agent can actually do when you stop holding it back -- this is the infrastructure for that.
 
 ## How the Agent Grows
 
