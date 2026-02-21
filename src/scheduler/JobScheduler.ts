@@ -268,6 +268,19 @@ export class JobScheduler {
     const prompt = this.buildPrompt(job);
     const sessionName = `job-${job.slug}-${Date.now().toString(36)}`;
 
+    // Write active-job.json BEFORE spawning so the session-start and
+    // compaction-recovery hooks can inject job-specific grounding context.
+    this.state.set('active-job', {
+      slug: job.slug,
+      name: job.name,
+      description: job.description,
+      priority: job.priority,
+      sessionName,
+      triggeredBy: reason,
+      startedAt: new Date().toISOString(),
+      grounding: job.grounding ?? null,
+    });
+
     this.sessionManager.spawnSession({
       name: sessionName,
       prompt,
@@ -345,6 +358,12 @@ export class JobScheduler {
 
     const job = this.jobs.find(j => j.slug === session.jobSlug);
     if (!job) return;
+
+    // Clear active-job.json now that the job is done
+    const activeJob = this.state.get<{ slug: string }>('active-job');
+    if (activeJob?.slug === job.slug) {
+      this.state.delete('active-job');
+    }
 
     // Update job state with completion result
     const failed = session.status === 'failed' || session.status === 'killed';

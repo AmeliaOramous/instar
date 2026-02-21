@@ -163,6 +163,18 @@ export class StateManager {
     this.atomicWrite(filePath, JSON.stringify(value, null, 2));
   }
 
+  delete(key: string): boolean {
+    this.validateKey(key, 'state key');
+    const filePath = path.join(this.stateDir, 'state', `${key}.json`);
+    if (!fs.existsSync(filePath)) return false;
+    try {
+      fs.unlinkSync(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Write a file atomically — write to .tmp then rename.
    * Prevents corruption from power loss or disk-full mid-write.

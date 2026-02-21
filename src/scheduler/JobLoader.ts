@@ -3,6 +3,11 @@
  *
  * Jobs define recurring work the agent should perform:
  * email checks, health probes, content publishing, etc.
+ *
+ * Grounding-by-default: Jobs are validated for grounding configuration.
+ * Missing grounding emits warnings — nudging the practice without breaking
+ * existing jobs. Jobs that process external input WITHOUT grounding get
+ * louder warnings because they represent a security surface.
  */
 
 import fs from 'node:fs';
@@ -11,6 +16,14 @@ import type { JobDefinition, JobPriority, ModelTier } from '../core/types.js';
 
 const VALID_PRIORITIES: JobPriority[] = ['critical', 'high', 'medium', 'low'];
 const VALID_MODELS: ModelTier[] = ['opus', 'sonnet', 'haiku'];
+
+/** Slugs for lightweight default jobs where grounding is unnecessary. */
+const GROUNDING_EXEMPT_SLUGS: ReadonlySet<string> = new Set([
+  'health-check',
+  'feedback-retry',
+  'dispatch-check',
+  'update-check',
+]);
 
 /**
  * Load and validate job definitions from a JSON file.
@@ -32,10 +45,15 @@ export function loadJobs(jobsFile: string): JobDefinition[] {
     throw new Error(`Jobs file must contain a JSON array, got ${typeof raw}`);
   }
 
-  return raw.map((job: unknown, index: number) => {
+  const jobs = raw.map((job: unknown, index: number) => {
     validateJob(job, index);
     return job as JobDefinition;
   });
+
+  // Grounding-by-default audit — warn about jobs missing grounding config
+  auditGrounding(jobs);
+
+  return jobs;
 }
 
 /**
@@ -105,5 +123,76 @@ export function validateJob(job: unknown, index?: number): void {
   // Optional args must be a string if present
   if (exec.args !== undefined && typeof exec.args !== 'string') {
     throw new Error(`${prefix}: execute.args must be a string if provided, got ${typeof exec.args}`);
+  }
+
+  // Grounding config — validate structure if present
+  if (j.grounding !== undefined) {
+    validateGrounding(j.grounding, prefix);
+  }
+}
+
+/**
+ * Validate grounding configuration structure.
+ * Throws on invalid structure — if you're going to declare grounding, do it right.
+ */
+function validateGrounding(grounding: unknown, prefix: string): void {
+  if (!grounding || typeof grounding !== 'object') {
+    throw new Error(`${prefix}: "grounding" must be an object if provided`);
+  }
+
+  const g = grounding as Record<string, unknown>;
+
+  if (typeof g.requiresIdentity !== 'boolean') {
+    throw new Error(`${prefix}: grounding.requiresIdentity must be a boolean`);
+  }
+
+  if (g.processesExternalInput !== undefined && typeof g.processesExternalInput !== 'boolean') {
+    throw new Error(`${prefix}: grounding.processesExternalInput must be a boolean if provided`);
+  }
+
+  if (g.contextFiles !== undefined) {
+    if (!Array.isArray(g.contextFiles)) {
+      throw new Error(`${prefix}: grounding.contextFiles must be an array of strings if provided`);
+    }
+    for (const f of g.contextFiles) {
+      if (typeof f !== 'string' || !f.trim()) {
+        throw new Error(`${prefix}: grounding.contextFiles entries must be non-empty strings`);
+      }
+    }
+  }
+
+  if (g.questions !== undefined) {
+    if (!Array.isArray(g.questions)) {
+      throw new Error(`${prefix}: grounding.questions must be an array of strings if provided`);
+    }
+    for (const q of g.questions) {
+      if (typeof q !== 'string' || !q.trim()) {
+        throw new Error(`${prefix}: grounding.questions entries must be non-empty strings`);
+      }
+    }
+  }
+}
+
+/**
+ * Audit loaded jobs for grounding configuration.
+ * Emits warnings for jobs missing grounding — the "nudge" layer.
+ * Exempt jobs (health-check, dispatch-check, etc.) are skipped silently.
+ */
+function auditGrounding(jobs: JobDefinition[]): void {
+  const ungrounded: string[] = [];
+
+  for (const job of jobs) {
+    if (!job.enabled) continue;
+    if (GROUNDING_EXEMPT_SLUGS.has(job.slug)) continue;
+    if (!job.grounding) {
+      ungrounded.push(job.slug);
+    }
+  }
+
+  if (ungrounded.length > 0) {
+    console.warn(
+      `[JobLoader] Grounding audit: ${ungrounded.length} enabled job(s) lack grounding config: ${ungrounded.join(', ')}. ` +
+      `Add a "grounding" field to declare identity and security requirements.`
+    );
   }
 }

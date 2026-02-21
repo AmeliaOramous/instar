@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -146,6 +146,123 @@ describe('JobLoader', () => {
 
     it('includes index in error message', () => {
       expect(() => validateJob(null, 3)).toThrow('Job[3]');
+    });
+
+    // ── Grounding validation ──────────────────────────────────────
+    describe('grounding validation', () => {
+      it('accepts job with valid grounding config', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: {
+            requiresIdentity: true,
+            processesExternalInput: false,
+            contextFiles: ['identity-core.md'],
+            questions: ['Am I grounded?'],
+          },
+        })).not.toThrow();
+      });
+
+      it('accepts job with minimal grounding (requiresIdentity only)', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: false },
+        })).not.toThrow();
+      });
+
+      it('accepts job without grounding (optional field)', () => {
+        expect(() => validateJob(validJob)).not.toThrow();
+      });
+
+      it('rejects grounding with non-boolean requiresIdentity', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: 'yes' },
+        })).toThrow('grounding.requiresIdentity must be a boolean');
+      });
+
+      it('rejects grounding with non-boolean processesExternalInput', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: true, processesExternalInput: 'true' },
+        })).toThrow('grounding.processesExternalInput must be a boolean');
+      });
+
+      it('rejects non-array contextFiles', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: true, contextFiles: 'file.md' },
+        })).toThrow('grounding.contextFiles must be an array');
+      });
+
+      it('rejects empty string in contextFiles', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: true, contextFiles: ['valid.md', ''] },
+        })).toThrow('grounding.contextFiles entries must be non-empty strings');
+      });
+
+      it('rejects non-array questions', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: true, questions: 'Am I grounded?' },
+        })).toThrow('grounding.questions must be an array');
+      });
+
+      it('rejects empty string in questions', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: { requiresIdentity: true, questions: ['valid?', '  '] },
+        })).toThrow('grounding.questions entries must be non-empty strings');
+      });
+
+      it('rejects non-object grounding', () => {
+        expect(() => validateJob({
+          ...validJob,
+          grounding: 'yes',
+        })).toThrow('"grounding" must be an object');
+      });
+    });
+  });
+
+  describe('grounding audit', () => {
+    it('warns about ungrounded enabled jobs', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const file = writeJobsFile([validJob]);
+      loadJobs(file);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Grounding audit: 1 enabled job(s)')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn about disabled jobs', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const file = writeJobsFile([{ ...validJob, enabled: false }]);
+      loadJobs(file);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn about grounded jobs', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const file = writeJobsFile([{
+        ...validJob,
+        grounding: { requiresIdentity: true },
+      }]);
+      loadJobs(file);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn about exempt jobs (health-check, dispatch-check)', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const file = writeJobsFile([
+        { ...validJob, slug: 'health-check' },
+        { ...validJob, slug: 'dispatch-check' },
+      ]);
+      loadJobs(file);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
   });
 });

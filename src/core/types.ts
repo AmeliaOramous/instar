@@ -70,6 +70,19 @@ export interface JobDefinition {
   tags?: string[];
   /** Telegram topic ID this job reports to (auto-created if not set) */
   topicId?: number;
+  /** Grounding configuration — what context this job needs at session start */
+  grounding?: JobGrounding;
+}
+
+export interface JobGrounding {
+  /** Whether this job requires identity grounding before execution */
+  requiresIdentity: boolean;
+  /** Whether this job processes external/untrusted input (requires security screening) */
+  processesExternalInput?: boolean;
+  /** Additional context files to inject at job start (relative to .instar/) */
+  contextFiles?: string[];
+  /** Custom grounding questions the agent must answer before proceeding */
+  questions?: string[];
 }
 
 export type JobPriority = 'critical' | 'high' | 'medium' | 'low';
@@ -380,10 +393,23 @@ export interface InstarConfig {
   dispatches?: DispatchConfig;
   /** Update configuration */
   updates?: UpdateConfig;
+  /** Publishing (Telegraph) config */
+  publishing?: PublishingConfig;
   /** Request timeout in milliseconds (default: 30000) */
   requestTimeoutMs?: number;
   /** Instar version (from package.json) */
   version?: string;
+}
+
+export interface PublishingConfig {
+  /** Whether publishing is enabled (default: true when Telegram is configured) */
+  enabled: boolean;
+  /** Short name for the Telegraph account */
+  shortName?: string;
+  /** Author name shown on published pages */
+  authorName?: string;
+  /** Author URL shown on published pages */
+  authorUrl?: string;
 }
 
 export interface DispatchConfig {
