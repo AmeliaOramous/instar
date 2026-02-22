@@ -87,7 +87,7 @@ The terminal session is the on-ramp. Telegram is where the agent experience live
 
 For **Personal Agents**: emphasize that this agent will be their persistent companion. It grows, learns, and communicates through Telegram. It's not a project tool — it's a presence.
 
-For **Project Agents**: emphasize that this agent will own the project's health and development. It monitors, builds, and maintains.
+For **Project Agents**: emphasize that this agent will own the project's health and development. It monitors, builds, maintains — and you talk to it through Telegram, just like a personal agent.
 
 ### Step 2a: The Thesis (Brief)
 
@@ -302,9 +302,7 @@ Frame it clearly:
 > - **Mobile access** — your agent is always reachable
 > - **Proactive** — your agent reaches out when something matters
 
-For **Personal Agents**: Telegram is essential. Without it, there IS no natural interface. Be direct: "This is how you'll talk to your agent."
-
-For **Project Agents**: Telegram is strongly recommended. Frame it as: "Your agent can message you about builds, issues, and progress — you just reply."
+For **both agent types**: Telegram is essential. It's the primary interface — how you talk to your agent from anywhere. Be direct: "This is how you'll talk to your agent." For project agents, add: "Your agent messages you about builds, issues, and progress — you just reply."
 
 If the user declines, accept it in one sentence and move on — but they should understand they're choosing the terminal-only experience.
 

@@ -280,10 +280,8 @@ async function runClassicSetup(): Promise<void> {
   console.log();
   console.log(pc.dim('  Once connected, you just talk — no commands, no terminal.'));
   console.log(pc.dim('  Topic threads, message history, mobile access, proactive notifications.'));
-  if (!isProjectAgent) {
-    console.log();
-    console.log(pc.dim('  For a personal agent, Telegram IS the interface.'));
-  }
+  console.log();
+  console.log(pc.dim('  Telegram IS the interface — for any agent type.'));
   console.log();
   console.log(pc.dim(`  If you don't have Telegram yet: ${pc.cyan('https://telegram.org/apps')}`));
   console.log(pc.dim('  Install it on your phone first — you\'ll need it to log in on the web.'));

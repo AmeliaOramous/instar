@@ -46,8 +46,8 @@ A guided setup handles the rest — identity, Telegram connection, server. Withi
 
 ### Two configurations
 
-- **General Agent** — A personal AI partner on your computer. Runs in the background, handles scheduled tasks, messages you proactively, and grows through experience.
-- **Project Agent** — A partner embedded in your codebase. Monitors, builds, maintains, and communicates through Telegram or terminal.
+- **General Agent** — A personal AI partner on your computer. Runs in the background, handles scheduled tasks, messages you on Telegram proactively, and grows through experience.
+- **Project Agent** — A partner embedded in your codebase. Monitors, builds, maintains, and messages you on Telegram — the same two-way communication as a general agent, scoped to your project.
 
 Once running, the infrastructure is invisible. Your partner manages its own jobs, health checks, evolution, and self-maintenance. You just talk to it.
 

@@ -681,7 +681,12 @@ curl -X POST localhost:4040/sessions/research/input \\
             </tr>
             <tr class="border-b border-slate-800/50">
               <td class="py-3 px-4 text-slate-500">Messaging</td>
-              <td class="py-3 px-4 text-slate-500">Telegram (more planned)</td>
+              <td class="py-3 px-4">
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>
+                  Telegram (two-way, primary interface)
+                </span>
+              </td>
               <td class="py-3 px-4">
                 <span class="inline-flex items-center gap-1.5">
                   <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>
@@ -742,7 +747,7 @@ curl -X POST localhost:4040/sessions/research/input \\
           </div>
           <div class="pb-6">
             <p class="text-slate-200 font-medium mb-2">Run one command</p>
-            <p class="text-slate-500 text-sm mb-3">Installs everything, walks you through setup, configures the server, optionally sets up Telegram, creates your first job, and starts it all.</p>
+            <p class="text-slate-500 text-sm mb-3">Installs everything, walks you through setup, connects Telegram, configures the server, creates your first job, and starts it all.</p>
             <div class="terminal text-sm">
               <div class="terminal-header">
                 <div class="terminal-dot bg-red-400/60"></div>
@@ -778,7 +783,7 @@ curl -X POST localhost:4040/sessions/research/input \\
         <div class="rounded-lg border border-slate-800 bg-slate-900/40 p-5">
           <p class="text-sm font-medium text-slate-300 mb-2">📁 Project Agent</p>
           <code class="text-xs text-teal-300 font-mono">cd my-project && npx instar</code>
-          <p class="text-xs text-slate-400 mt-2">Add an agent to your codebase. Monitors, builds, and maintains your project.</p>
+          <p class="text-xs text-slate-400 mt-2">An agent embedded in your codebase. Monitors, builds, maintains &mdash; and you talk to it through Telegram just like a general agent.</p>
         </div>
       </div>
     </div>
