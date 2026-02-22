@@ -121,7 +121,7 @@ describe('Session reaping and detection', () => {
 
     it('passes prompt as CLI argument and unsets CLAUDECODE env var', () => {
       source = fs.readFileSync(SOURCE_PATH, 'utf-8');
-      // spawnSession wraps claude in bash -c to unset CLAUDECODE env var
+      // spawnSession uses tmux -e flag to unset CLAUDECODE env var directly
       // (prevents "cannot be launched inside another Claude Code session" errors)
       const spawnSection = source.match(/async spawnSession[\s\S]*?this\.state\.saveSession\(session\)/);
       expect(spawnSection).toBeTruthy();
@@ -131,7 +131,8 @@ describe('Session reaping and detection', () => {
       // Should use this.config.claudePath
       expect(body).toContain('this.config.claudePath');
       // Should unset CLAUDECODE to prevent nested Claude Code errors
-      expect(body).toContain('unset CLAUDECODE');
+      // Uses tmux -e flag: '-e', 'CLAUDECODE=' sets env var to empty (unset) in spawned session
+      expect(body).toContain("'CLAUDECODE='");
     });
   });
 

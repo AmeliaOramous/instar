@@ -154,26 +154,24 @@ export class SessionManager extends EventEmitter {
       throw new Error(`tmux session "${tmuxSession}" already exists`);
     }
 
-    // Build Claude CLI arguments via bash wrapper.
-    // Must unset CLAUDECODE to prevent "cannot be launched inside another Claude Code session"
-    // error when instar itself runs inside Claude Code.
+    // Build Claude CLI arguments — no shell intermediary.
+    // tmux new-session executes the command directly (no bash -c needed)
+    // when given as separate arguments after the session options.
+    // Use -e CLAUDECODE= to unset the CLAUDECODE env var in spawned sessions,
+    // preventing nested Claude Code detection when instar runs inside Claude Code.
     const claudeArgs = ['--dangerously-skip-permissions'];
     if (options.model) {
       claudeArgs.push('--model', options.model);
     }
     claudeArgs.push('-p', options.prompt);
 
-    const claudeCmd = [this.config.claudePath, ...claudeArgs]
-      .map(a => a.replace(/'/g, "'\\''"))
-      .map(a => `'${a}'`)
-      .join(' ');
-
     try {
       execFileSync(this.config.tmuxPath, [
         'new-session', '-d',
         '-s', tmuxSession,
         '-c', this.config.projectDir,
-        'bash', '-c', `unset CLAUDECODE; exec ${claudeCmd}`,
+        '-e', 'CLAUDECODE=',
+        this.config.claudePath, ...claudeArgs,
       ], { encoding: 'utf-8' });
     } catch (err) {
       throw new Error(`Failed to create tmux session: ${err}`);
