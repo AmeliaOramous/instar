@@ -436,8 +436,9 @@ export class JobScheduler {
     // Try to drain the queue now that a slot is available
     this.processQueue();
 
-    // Skip notifications if no messaging configured
+    // Skip notifications if no messaging configured or job opted out
     if (!this.messenger && !this.telegram) return;
+    if (job.telegramNotify === false) return;
 
     // Capture the last output from the tmux session
     let output = '';
@@ -492,9 +493,10 @@ export class JobScheduler {
       summary += '\n_No output captured (session already closed)_';
     }
 
-    // Skip Telegram notification for successful jobs with no meaningful output
-    // Prevents empty notification spam (e.g., dispatch-check when dispatch is unconfigured)
-    if (!failed && (!output || !output.trim())) {
+    // Skip Telegram notification for jobs with no meaningful output — applies regardless of status.
+    // Failure alerts are already handled by alertOnConsecutiveFailures above.
+    // Prevents "No output captured (session already closed)" spam on every failed cycle.
+    if (!output || !output.trim()) {
       console.log(`[scheduler] Skipping notification for ${job.slug} — no meaningful output`);
       return;
     }
@@ -542,6 +544,9 @@ export class JobScheduler {
     const mappings = this.state.get<Record<string, number>>('job-topic-mappings') ?? {};
 
     for (const job of enabledJobs) {
+      // Opt-out: skip topic creation entirely when telegramNotify is explicitly false
+      if (job.telegramNotify === false) continue;
+
       // If job already has a topicId (from jobs.json or previous mapping), use it
       if (job.topicId) {
         mappings[job.slug] = job.topicId;

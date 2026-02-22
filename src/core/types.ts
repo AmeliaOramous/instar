@@ -76,6 +76,10 @@ export interface JobDefinition {
   tags?: string[];
   /** Telegram topic ID this job reports to (auto-created if not set) */
   topicId?: number;
+  /** Set to false to disable all Telegram notifications for this job.
+   *  Also prevents topic creation in ensureJobTopics.
+   *  Useful for low-signal jobs that report via other channels. */
+  telegramNotify?: boolean;
   /** Grounding configuration — what context this job needs at session start */
   grounding?: JobGrounding;
   /** LLM supervision tier — see docs/LLM-SUPERVISED-EXECUTION.md */
