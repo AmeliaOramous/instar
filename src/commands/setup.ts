@@ -22,7 +22,8 @@ import path from 'node:path';
 import pc from 'picocolors';
 import { input, confirm, select, number } from '@inquirer/prompts';
 import { Cron } from 'croner';
-import { detectTmuxPath, detectClaudePath, ensureStateDir } from '../core/Config.js';
+import { detectTmuxPath, detectClaudePath, ensureStateDir, getInstarVersion } from '../core/Config.js';
+import { FeedbackManager } from '../core/FeedbackManager.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { UserManager } from '../users/UserManager.js';
 import { validateJob } from '../scheduler/JobLoader.js';
@@ -506,6 +507,50 @@ async function runClassicSetup(): Promise<void> {
     } else {
       console.log('  Once running, just talk to your agent through Claude Code sessions.');
       console.log('  For a richer experience, set up Telegram later with your agent\'s help.');
+    }
+  }
+
+  // ── Post-setup feedback ──────────────────────────────────────────
+  console.log();
+  const wantsFeedback = await confirm({
+    message: 'Quick question — how did the setup go? Want to share feedback?',
+    default: false,
+  });
+
+  if (wantsFeedback) {
+    const feedbackText = await input({
+      message: 'What went well, what was confusing, or what would you change?',
+    });
+
+    if (feedbackText.trim()) {
+      try {
+        const version = getInstarVersion();
+        const fm = new FeedbackManager({
+          enabled: true,
+          webhookUrl: 'https://dawn.bot-me.ai/api/instar/feedback',
+          feedbackFile: path.join(stateDir, 'feedback.json'),
+          version,
+        });
+
+        await fm.submit({
+          type: 'improvement',
+          title: 'Setup wizard feedback',
+          description: feedbackText.trim(),
+          agentName: config.projectName || 'unknown',
+          instarVersion: version,
+          nodeVersion: process.version,
+          os: process.platform,
+          context: JSON.stringify({
+            setupMode: 'classic',
+            telegramConfigured: !!telegramConfig?.chatId,
+            gitDetected: detectGitRepo(projectDir).isRepo,
+          }),
+        });
+
+        console.log(pc.green('  Thanks! Your feedback helps make Instar better for everyone.'));
+      } catch {
+        console.log(pc.dim('  Feedback saved locally. Thanks!'));
+      }
     }
   }
 
