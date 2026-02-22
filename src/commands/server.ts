@@ -25,6 +25,8 @@ import { FeedbackManager } from '../core/FeedbackManager.js';
 import { DispatchManager } from '../core/DispatchManager.js';
 import { UpdateChecker } from '../core/UpdateChecker.js';
 import { AutoUpdater } from '../core/AutoUpdater.js';
+import { AutoDispatcher } from '../core/AutoDispatcher.js';
+import { DispatchExecutor } from '../core/DispatchExecutor.js';
 import { registerPort, unregisterPort, startHeartbeat } from '../core/PortRegistry.js';
 import { TelegraphService } from '../publishing/TelegraphService.js';
 import { PrivateViewer } from '../publishing/PrivateViewer.js';
@@ -513,14 +515,30 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
       console.log(pc.green('  Feedback loop enabled'));
     }
-    // Set up dispatch system
+    // Set up dispatch system with auto-dispatcher
     let dispatches: DispatchManager | undefined;
+    let autoDispatcher: AutoDispatcher | undefined;
     if (config.dispatches) {
       dispatches = new DispatchManager({
         ...config.dispatches,
         version: config.version,
       });
-      console.log(pc.green('  Dispatch system enabled'));
+
+      const dispatchExecutor = new DispatchExecutor(config.projectDir, sessionManager);
+      autoDispatcher = new AutoDispatcher(
+        dispatches,
+        dispatchExecutor,
+        state,
+        config.stateDir,
+        {
+          pollIntervalMinutes: 30,
+          autoApplyPassive: config.dispatches.autoApply ?? true,
+          autoExecuteActions: true,
+        },
+        telegram,
+      );
+      autoDispatcher.start();
+      console.log(pc.green('  Dispatch system enabled (auto-polling active)'));
     }
 
     const updateChecker = new UpdateChecker({
@@ -592,7 +610,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     console.log(pc.green('  Evolution system enabled'));
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, quotaTracker, publisher, viewer, tunnel, evolution });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution });
     await server.start();
 
     // Start tunnel AFTER server is listening
@@ -610,6 +628,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     const shutdown = async () => {
       console.log('\nShutting down...');
       autoUpdater.stop();
+      autoDispatcher?.stop();
       if (tunnel) await tunnel.stop();
       stopHeartbeat();
       unregisterPort(config.projectName);

@@ -21,6 +21,7 @@ import type { FeedbackManager } from '../core/FeedbackManager.js';
 import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { AutoUpdater } from '../core/AutoUpdater.js';
+import type { AutoDispatcher } from '../core/AutoDispatcher.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import type { TelegraphService } from '../publishing/TelegraphService.js';
 import type { PrivateViewer } from '../publishing/PrivateViewer.js';
@@ -39,6 +40,7 @@ export interface RouteContext {
   dispatches: DispatchManager | null;
   updateChecker: UpdateChecker | null;
   autoUpdater: AutoUpdater | null;
+  autoDispatcher: AutoDispatcher | null;
   quotaTracker: QuotaTracker | null;
   publisher: TelegraphService | null;
   viewer: PrivateViewer | null;
@@ -1067,6 +1069,14 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  router.get('/dispatches/auto', (_req, res) => {
+    if (!ctx.autoDispatcher) {
+      res.status(503).json({ error: 'Auto-dispatcher not configured' });
+      return;
+    }
+    res.json(ctx.autoDispatcher.getStatus());
   });
 
   router.get('/dispatches/pending', (_req, res) => {

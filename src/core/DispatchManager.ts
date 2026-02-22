@@ -20,7 +20,7 @@ import type { DispatchConfig } from './types.js';
 
 export interface Dispatch {
   dispatchId: string;
-  type: 'strategy' | 'behavioral' | 'lesson' | 'configuration' | 'security';
+  type: 'strategy' | 'behavioral' | 'lesson' | 'configuration' | 'security' | 'action';
   title: string;
   content: string;
   priority: 'low' | 'normal' | 'high' | 'critical';

@@ -17,6 +17,7 @@ import type { FeedbackManager } from '../core/FeedbackManager.js';
 import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { AutoUpdater } from '../core/AutoUpdater.js';
+import type { AutoDispatcher } from '../core/AutoDispatcher.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import type { TelegraphService } from '../publishing/TelegraphService.js';
 import type { PrivateViewer } from '../publishing/PrivateViewer.js';
@@ -42,6 +43,7 @@ export class AgentServer {
     dispatches?: DispatchManager;
     updateChecker?: UpdateChecker;
     autoUpdater?: AutoUpdater;
+    autoDispatcher?: AutoDispatcher;
     quotaTracker?: QuotaTracker;
     publisher?: TelegraphService;
     viewer?: PrivateViewer;
@@ -70,6 +72,7 @@ export class AgentServer {
       dispatches: options.dispatches ?? null,
       updateChecker: options.updateChecker ?? null,
       autoUpdater: options.autoUpdater ?? null,
+      autoDispatcher: options.autoDispatcher ?? null,
       quotaTracker: options.quotaTracker ?? null,
       publisher: options.publisher ?? null,
       viewer: options.viewer ?? null,
