@@ -1645,13 +1645,61 @@ export function createRoutes(ctx: RouteContext): Router {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
     } else if (ctx.sessionManager) {
-      // No telegram adapter with routing — inject directly into any mapped session
-      ctx.sessionManager.injectTelegramMessage(
-        `${ctx.config.projectName}-interface`,
-        topicId,
-        text,
-      );
-      res.json({ ok: true, forwarded: true, method: 'direct-inject' });
+      // No TelegramAdapter (--no-telegram mode) — route using topic-session registry on disk
+      const registryPath = path.join(ctx.config.stateDir, 'topic-session-registry.json');
+      let targetSession: string | null = null;
+
+      try {
+        if (fs.existsSync(registryPath)) {
+          const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+          targetSession = registry.topicToSession?.[String(topicId)] ?? null;
+        }
+      } catch { /* registry read failed — fall through to spawn */ }
+
+      if (targetSession && ctx.sessionManager.isSessionAlive(targetSession)) {
+        // Session exists and is alive — inject message
+        console.log(`[telegram-forward] Injecting into ${targetSession}: "${text.slice(0, 80)}"`);
+        ctx.sessionManager.injectTelegramMessage(targetSession, topicId, text);
+        res.json({ ok: true, forwarded: true, method: 'registry-inject', session: targetSession });
+      } else {
+        // No session or session dead — auto-spawn a new one
+        const topicName = targetSession || `topic-${topicId}`;
+        console.log(`[telegram-forward] No live session for topic ${topicId}, spawning "${topicName}"...`);
+
+        const contextLines = [
+          `This session was auto-created for Telegram topic ${topicId}.`,
+          ``,
+          `CRITICAL: You MUST relay your response back to Telegram after responding.`,
+          `Use the relay script:`,
+          ``,
+          `cat <<'EOF' | .claude/scripts/telegram-reply.sh ${topicId}`,
+          `Your response text here`,
+          `EOF`,
+          ``,
+          `Strip the [telegram:${topicId}] prefix before interpreting the message.`,
+          `Only relay conversational text — not tool output or internal reasoning.`,
+        ];
+        const tmpDir = '/tmp/instar-telegram';
+        fs.mkdirSync(tmpDir, { recursive: true });
+        const ctxPath = path.join(tmpDir, `ctx-${topicId}-${Date.now()}.txt`);
+        fs.writeFileSync(ctxPath, contextLines.join('\n'));
+
+        const bootstrapMessage = `[telegram:${topicId}] ${text} (IMPORTANT: Read ${ctxPath} for Telegram relay instructions — you MUST relay your response back.)`;
+
+        ctx.sessionManager.spawnInteractiveSession(bootstrapMessage, topicName, { telegramTopicId: topicId }).then((newSessionName) => {
+          // Update registry on disk
+          try {
+            const reg = fs.existsSync(registryPath) ? JSON.parse(fs.readFileSync(registryPath, 'utf-8')) : { topicToSession: {}, topicToName: {} };
+            reg.topicToSession[String(topicId)] = newSessionName;
+            fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2));
+          } catch { /* non-critical */ }
+          console.log(`[telegram-forward] Spawned "${newSessionName}" for topic ${topicId}`);
+        }).catch((err) => {
+          console.error(`[telegram-forward] Spawn failed:`, err);
+        });
+
+        res.json({ ok: true, forwarded: true, method: 'spawn', topicName });
+      }
     } else {
       res.status(503).json({ error: 'No message routing available' });
     }
