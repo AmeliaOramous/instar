@@ -265,9 +265,11 @@ export class UpdateChecker {
   }
 
   /**
-   * Fetch human-readable changelog from GitHub releases.
+   * Fetch human-readable changelog from GitHub releases, falling back to
+   * recent commit messages if no release exists for this version.
    */
   async fetchChangelog(version: string): Promise<string | undefined> {
+    // Try GitHub release first
     try {
       const tag = version.startsWith('v') ? version : `v${version}`;
       const response = await fetch(`${GITHUB_RELEASES_URL}/tags/${tag}`, {
@@ -278,18 +280,48 @@ export class UpdateChecker {
         signal: AbortSignal.timeout(10000),
       });
 
-      if (!response.ok) return undefined;
-
-      const release = await response.json() as { body?: string; name?: string };
-      if (release.body) {
-        // Truncate to first 500 chars for concise summary
-        const summary = release.body.slice(0, 500);
-        return summary.length < release.body.length ? summary + '...' : summary;
+      if (response.ok) {
+        const release = await response.json() as { body?: string; name?: string };
+        if (release.body) {
+          const summary = release.body.slice(0, 500);
+          return summary.length < release.body.length ? summary + '...' : summary;
+        }
+        if (release.name) return release.name;
       }
-      if (release.name) return release.name;
+    } catch {
+      // Non-critical — try commit fallback
+    }
+
+    // Fallback: fetch recent commits from GitHub
+    try {
+      const response = await fetch(
+        'https://api.github.com/repos/SageMindAI/instar/commits?per_page=5',
+        {
+          headers: {
+            'Accept': 'application/vnd.github.v3+json',
+            'User-Agent': 'instar-update-checker',
+          },
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+
+      if (response.ok) {
+        const commits = await response.json() as Array<{ commit: { message: string } }>;
+        if (commits.length > 0) {
+          const lines = commits
+            .map(c => {
+              // Take first line of commit message only
+              const firstLine = c.commit.message.split('\n')[0];
+              return `• ${firstLine}`;
+            })
+            .join('\n');
+          return `Recent changes:\n${lines}`;
+        }
+      }
     } catch {
       // Non-critical
     }
+
     return undefined;
   }
 

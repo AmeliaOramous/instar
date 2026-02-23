@@ -180,7 +180,8 @@ export class AutoUpdater {
         // Just notify — don't apply
         await this.notify(
           `Update available: v${info.currentVersion} → v${info.latestVersion}\n\n` +
-          (info.changeSummary ? `Changes: ${info.changeSummary}\n\n` : '') +
+          (info.changeSummary ? `What changed:\n${info.changeSummary}\n\n` : '') +
+          `Details: ${info.changelogUrl || 'https://github.com/SageMindAI/instar/releases'}\n\n` +
           `Auto-apply is disabled. Apply manually:\n` +
           `curl -X POST http://localhost:${this.getPort()}/updates/apply`
         );
@@ -214,15 +215,22 @@ export class AutoUpdater {
 
       // Step 5: Notify via Telegram
       const restartNote = result.restartNeeded && this.config.autoRestart
-        ? 'Server is restarting now...'
+        ? '\nServer is restarting now...'
         : result.restartNeeded
-          ? 'A server restart is needed to use the new version.'
+          ? '\nA server restart is needed to use the new version.'
           : '';
+
+      const changeSummary = info.changeSummary
+        ? `What changed:\n${info.changeSummary}\n`
+        : '';
+      const detailsUrl = info.changelogUrl || 'https://github.com/SageMindAI/instar/releases';
 
       await this.notify(
         `Updated: v${result.previousVersion} → v${result.newVersion}\n\n` +
-        (info.changeSummary ? `What changed:\n${info.changeSummary}\n\n` : '') +
-        restartNote
+        changeSummary +
+        `Details: ${detailsUrl}\n` +
+        restartNote +
+        `\n\nTo disable auto-updates, set "autoApply": false in .instar/config.json under "updates".`
       );
 
       // Step 6: Self-restart if needed and configured
