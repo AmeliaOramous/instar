@@ -184,6 +184,7 @@ export function loadConfig(projectDir?: string): InstarConfig {
       healthCheckIntervalMs: 30000,
     },
     authToken: fileConfig.authToken,
+    dashboardPin: fileConfig.dashboardPin,
     relationships: fileConfig.relationships || {
       relationshipsDir: path.join(stateDir, 'relationships'),
       maxRecentInteractions: 20,

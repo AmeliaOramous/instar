@@ -32,6 +32,8 @@ import { registerPort, unregisterPort, startHeartbeat } from '../core/PortRegist
 import { TelegraphService } from '../publishing/TelegraphService.js';
 import { PrivateViewer } from '../publishing/PrivateViewer.js';
 import { TunnelManager } from '../tunnel/TunnelManager.js';
+import { PostUpdateMigrator } from '../core/PostUpdateMigrator.js';
+import { UpgradeGuideProcessor } from '../core/UpgradeGuideProcessor.js';
 import { EvolutionManager } from '../core/EvolutionManager.js';
 import { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import { AccountSwitcher } from '../monitoring/AccountSwitcher.js';
@@ -552,6 +554,15 @@ function cleanupTelegramTempFiles(): void {
  * The self-diagnosis job checks .instar/logs/server.log — this ensures it exists.
  * Log is truncated at 5MB to prevent unbounded growth.
  */
+function getInstalledVersion(): string {
+  try {
+    const pkgPath = path.resolve(new URL(import.meta.url).pathname, '../../../package.json');
+    return JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version || '';
+  } catch {
+    return '';
+  }
+}
+
 function setupServerLog(stateDir: string): void {
   const logDir = path.join(stateDir, '..', 'logs');
   fs.mkdirSync(logDir, { recursive: true });
@@ -606,6 +617,53 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     // Clean up stale Telegram temp files on startup
     cleanupTelegramTempFiles();
+
+    // Run post-update migration on startup — ensures agent knowledge stays current
+    // even if the update was installed externally (e.g., via `npm install -g instar@latest`)
+    try {
+      const installedVersion = getInstalledVersion();
+      const versionFile = path.join(config.stateDir, 'state', 'last-migrated-version.json');
+      let lastMigrated = '';
+      try { lastMigrated = JSON.parse(fs.readFileSync(versionFile, 'utf-8')).version || ''; } catch { /* first run */ }
+      if (installedVersion && installedVersion !== lastMigrated) {
+        const hasTelegram = config.messaging?.some((m: any) => m.type === 'telegram') ?? false;
+        const migrator = new PostUpdateMigrator({
+          projectDir: config.projectDir,
+          stateDir: config.stateDir,
+          port: config.port,
+          hasTelegram,
+          projectName: config.projectName,
+        });
+        const migration = migrator.migrate();
+        if (migration.upgraded.length > 0) {
+          console.log(pc.green(`  Knowledge upgrade (v${lastMigrated || '?'} → v${installedVersion}): ${migration.upgraded.join(', ')}`));
+        }
+        // Record the migrated version
+        const dir = path.dirname(versionFile);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(versionFile, JSON.stringify({ version: installedVersion, migratedAt: new Date().toISOString() }));
+
+        // Also run upgrade guide processing — ensures pending guide file exists
+        // even if the update was installed without running `instar migrate`.
+        // Skip if a pending guide already exists (from a prior `instar migrate` run).
+        try {
+          const guideProcessor = new UpgradeGuideProcessor({
+            stateDir: config.stateDir,
+            currentVersion: installedVersion,
+          });
+          if (!guideProcessor.hasPendingGuide()) {
+            const guideResult = guideProcessor.process();
+            if (guideResult.pendingGuides.length > 0) {
+              console.log(pc.green(`  Upgrade guides pending: ${guideResult.pendingGuides.join(', ')}`));
+            }
+          }
+        } catch (guideErr) {
+          console.log(pc.yellow(`  Upgrade guide check: ${guideErr instanceof Error ? guideErr.message : String(guideErr)}`));
+        }
+      }
+    } catch (err) {
+      console.log(pc.yellow(`  Post-update migration check: ${err instanceof Error ? err.message : String(err)}`));
+    }
 
     // Register this instance in the port registry (multi-instance support)
     try {
@@ -992,6 +1050,66 @@ export async function startServer(options: StartOptions): Promise<void> {
     } catch (err) {
       // Non-critical — don't crash the server over autostart
       console.error(`  Auto-start check failed: ${err instanceof Error ? err.message : err}`);
+    }
+
+    // Spawn a short session to process any pending upgrade guide and message the user.
+    // This fires after full server initialization — sessionManager, telegram, everything is ready.
+    // The guide was written by `instar migrate` (during auto-update) or by the startup migration above.
+    try {
+      const pendingGuidePath = path.join(config.stateDir, 'state', 'pending-upgrade-guide.md');
+      if (fs.existsSync(pendingGuidePath)) {
+        const guideContent = fs.readFileSync(pendingGuidePath, 'utf-8');
+        if (guideContent.trim()) {
+          console.log(pc.green('  Pending upgrade guide detected — spawning session to notify user'));
+
+          // Brief delay so server is fully ready (scheduler, tunnel, etc.)
+          setTimeout(async () => {
+            try {
+              // Find the Telegram reply script for the prompt (may be in .claude/scripts or .instar/scripts)
+              const replyScriptClaude = path.join(config.projectDir, '.claude', 'scripts', 'telegram-reply.sh');
+              const replyScriptInstar = path.join(config.projectDir, '.instar', 'scripts', 'telegram-reply.sh');
+              const replyScript = fs.existsSync(replyScriptClaude) ? replyScriptClaude
+                : fs.existsSync(replyScriptInstar) ? replyScriptInstar : '';
+              const hasReplyScript = !!replyScript;
+              const attentionTopicId = state.get<number>('agent-attention-topic') || state.get<number>('agent-update-topic') || 0;
+
+              await sessionManager.spawnSession({
+                name: 'upgrade-notify',
+                prompt: [
+                  'IMPORTANT: You are a SHORT-LIVED session with ONE specific task. Do NOT search for files or explore the codebase. Everything you need is in this prompt.',
+                  '',
+                  'You have been updated to a new Instar version. Read the upgrade guide below, then:',
+                  '',
+                  '1. Compose a brief message (3-6 sentences) for your user about the new features.',
+                  '   - Focus on what matters to THEM, not internal plumbing',
+                  '   - Explain features in practical terms',
+                  '   - Be conversational and helpful',
+                  '',
+                  `2. Send the message via Telegram:`,
+                  hasReplyScript && attentionTopicId
+                    ? `   Run: echo "YOUR_MESSAGE" | bash ${replyScript} ${attentionTopicId}`
+                    : `   Use the telegram-reply script in .instar/scripts/ to send to the attention/update topic.`,
+                  '',
+                  '3. Run: instar upgrade-ack',
+                  '',
+                  'That is ALL. Do not do anything else. Do not search for files. Do not read config files. Just compose, send, ack.',
+                  '',
+                  '--- UPGRADE GUIDE ---',
+                  guideContent,
+                  '--- END GUIDE ---',
+                ].join('\n'),
+                model: 'haiku',
+                jobSlug: 'upgrade-notify',
+                maxDurationMinutes: 5,
+              });
+            } catch (err) {
+              console.error(`[UpgradeGuide] Failed to spawn notification session: ${err instanceof Error ? err.message : err}`);
+            }
+          }, 15_000); // 15 second delay — let everything settle
+        }
+      }
+    } catch {
+      // Non-critical — don't crash the server over upgrade guide processing
     }
 
     // Graceful shutdown

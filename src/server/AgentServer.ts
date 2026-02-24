@@ -8,10 +8,11 @@
  * WebSocket connections for real-time terminal streaming.
  */
 
-import express, { type Express } from 'express';
+import express, { type Express, type Request, type Response } from 'express';
 import type { Server } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
@@ -80,6 +81,56 @@ export class AgentServer {
     });
     this.app.use('/dashboard', express.static(dashboardDir));
 
+    // PIN-based dashboard unlock — exchanges a short PIN for the auth token.
+    // Placed before auth middleware so the dashboard can call it without a token.
+    if (options.config.dashboardPin && options.config.authToken) {
+      const pinAttempts = new Map<string, { count: number; resetAt: number }>();
+      const MAX_ATTEMPTS = 5;
+      const WINDOW_MS = 5 * 60 * 1000; // 5-minute window
+
+      this.app.post('/dashboard/unlock', (req: Request, res: Response) => {
+        const ip = req.ip || req.socket.remoteAddress || 'unknown';
+
+        // Rate limit by IP
+        const now = Date.now();
+        let entry = pinAttempts.get(ip);
+        if (entry && now > entry.resetAt) {
+          pinAttempts.delete(ip);
+          entry = undefined;
+        }
+        if (entry && entry.count >= MAX_ATTEMPTS) {
+          res.status(429).json({ error: 'Too many attempts. Try again later.' });
+          return;
+        }
+
+        const { pin } = req.body;
+        if (!pin || typeof pin !== 'string') {
+          res.status(400).json({ error: 'Missing PIN' });
+          return;
+        }
+
+        const ha = createHash('sha256').update(pin).digest();
+        const hb = createHash('sha256').update(options.config.dashboardPin!).digest();
+        if (!timingSafeEqual(ha, hb)) {
+          // Track failed attempt
+          if (!entry) {
+            entry = { count: 0, resetAt: now + WINDOW_MS };
+            pinAttempts.set(ip, entry);
+          }
+          entry.count++;
+          const remaining = MAX_ATTEMPTS - entry.count;
+          res.status(403).json({
+            error: 'Incorrect PIN',
+            attemptsRemaining: remaining,
+          });
+          return;
+        }
+
+        // PIN correct — return the auth token
+        res.json({ token: options.config.authToken });
+      });
+    }
+
     this.app.use(authMiddleware(options.config.authToken));
     this.app.use(requestTimeout(options.config.requestTimeoutMs));
 
@@ -142,6 +193,7 @@ export class AgentServer {
           sessionManager: this.sessionManager,
           state: this.state,
           authToken: this.config.authToken,
+          instarDir: this.config.stateDir,
         });
 
         resolve();

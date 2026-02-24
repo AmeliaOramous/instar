@@ -27,6 +27,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server as HttpServer, IncomingMessage } from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 
@@ -46,16 +48,21 @@ export class WebSocketManager {
   private sessionManager: SessionManager;
   private state: StateManager;
   private authToken?: string;
+  private registryPath?: string;
 
   constructor(options: {
     server: HttpServer;
     sessionManager: SessionManager;
     state: StateManager;
     authToken?: string;
+    instarDir?: string;
   }) {
     this.sessionManager = options.sessionManager;
     this.state = options.state;
     this.authToken = options.authToken;
+    if (options.instarDir) {
+      this.registryPath = path.join(options.instarDir, 'topic-session-registry.json');
+    }
 
     this.wss = new WebSocketServer({
       noServer: true,
@@ -268,32 +275,52 @@ export class WebSocketManager {
     this.streamInterval.unref();
   }
 
-  private sendSessionList(ws: WebSocket): void {
+  /**
+   * Resolve display names by cross-referencing the topic-session registry.
+   * Maps tmux session names to their Telegram topic names.
+   */
+  private getTopicDisplayNames(): Map<string, string> {
+    const map = new Map<string, string>();
+    if (!this.registryPath) return map;
+    try {
+      const data = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+      const topicToSession: Record<string, string> = data.topicToSession || {};
+      const topicToName: Record<string, string> = data.topicToName || {};
+      // Build reverse map: tmux session name → topic display name
+      for (const [topicId, tmuxSession] of Object.entries(topicToSession)) {
+        const name = topicToName[topicId];
+        if (name) {
+          map.set(tmuxSession, name);
+        }
+      }
+    } catch {
+      // Registry missing or corrupt — skip
+    }
+    return map;
+  }
+
+  private buildSessionList() {
     const running = this.sessionManager.listRunningSessions();
-    const sessions = running.map(s => ({
+    const displayNames = this.getTopicDisplayNames();
+    return running.map(s => ({
       id: s.id,
-      name: s.name,
+      name: displayNames.get(s.tmuxSession) || s.name,
       tmuxSession: s.tmuxSession,
       status: s.status,
       startedAt: s.startedAt,
       jobSlug: s.jobSlug,
       model: s.model,
     }));
+  }
+
+  private sendSessionList(ws: WebSocket): void {
+    const sessions = this.buildSessionList();
     this.send(ws, { type: 'sessions', sessions });
   }
 
   private broadcastSessionList(): void {
     if (this.clients.size === 0) return;
-    const running = this.sessionManager.listRunningSessions();
-    const sessions = running.map(s => ({
-      id: s.id,
-      name: s.name,
-      tmuxSession: s.tmuxSession,
-      status: s.status,
-      startedAt: s.startedAt,
-      jobSlug: s.jobSlug,
-      model: s.model,
-    }));
+    const sessions = this.buildSessionList();
     const msg = JSON.stringify({ type: 'sessions', sessions });
     for (const client of this.clients.values()) {
       if (client.ws.readyState === WebSocket.OPEN) {

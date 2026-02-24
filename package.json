@@ -1,6 +1,6 @@
 {
   "name": "instar",
-  "version": "0.8.16",
+  "version": "0.8.20",
   "description": "Persistent autonomy infrastructure for AI agents",
   "type": "module",
   "main": "dist/index.js",

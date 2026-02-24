@@ -401,11 +401,149 @@
       margin-top: 8px;
     }
 
+    /* Mobile back button */
+    .back-btn {
+      display: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+      margin-right: 8px;
+    }
+
+    .back-btn:hover { background: var(--bg-hover); }
+
     /* Scrollbar */
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+    /* ── Mobile responsive ─────────────────────────────────── */
+    @media (max-width: 768px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+
+      /* In mobile, sidebar and main toggle visibility */
+      .app.terminal-active .sidebar {
+        display: none;
+      }
+
+      .app:not(.terminal-active) .main {
+        display: none;
+      }
+
+      .app.terminal-active .back-btn {
+        display: inline-block;
+      }
+
+      /* Larger tap targets */
+      .session-item {
+        padding: 14px 12px;
+        margin-bottom: 4px;
+      }
+
+      .session-name {
+        font-size: 15px;
+      }
+
+      .session-meta {
+        font-size: 12px;
+        margin-top: 4px;
+      }
+
+      .action-btn {
+        padding: 8px 14px;
+        font-size: 14px;
+      }
+
+      .terminal-actions {
+        gap: 4px;
+        flex-wrap: wrap;
+      }
+
+      .terminal-header {
+        padding: 8px 12px;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .terminal-header .session-info {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .terminal-header .session-info h3 {
+        font-size: 13px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      /* Input bar — stack on very small screens */
+      .input-bar {
+        padding: 8px;
+        gap: 6px;
+      }
+
+      .input-bar input {
+        font-size: 16px; /* Prevents iOS zoom on focus */
+        padding: 10px 12px;
+      }
+
+      .input-bar button {
+        padding: 10px 14px;
+        font-size: 14px;
+      }
+
+      /* Terminal font smaller on mobile */
+      .terminal-container {
+        padding: 2px;
+      }
+
+      /* Auth box responsive */
+      .auth-box {
+        width: calc(100vw - 32px);
+        max-width: 360px;
+        padding: 24px;
+      }
+
+      .auth-box input {
+        font-size: 16px; /* Prevents iOS zoom */
+        padding: 12px 14px;
+      }
+
+      .auth-box button {
+        padding: 12px;
+        font-size: 15px;
+      }
+
+      /* Header compact */
+      .header {
+        padding: 10px 14px;
+      }
+
+      .header h1 {
+        font-size: 15px;
+      }
+
+      .header .logo {
+        font-size: 18px;
+      }
+
+      .sidebar-header {
+        padding: 12px 14px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -413,8 +551,8 @@
   <div class="auth-overlay" id="authOverlay">
     <div class="auth-box">
       <h2>Instar Dashboard</h2>
-      <p>Enter your auth token to connect</p>
-      <input type="password" id="tokenInput" placeholder="Bearer token..." autofocus>
+      <p>Enter your PIN to connect</p>
+      <input type="password" id="pinInput" placeholder="PIN..." autofocus inputmode="numeric">
       <button onclick="authenticate()">Connect</button>
       <div class="auth-error" id="authError" style="display:none"></div>
     </div>
@@ -455,6 +593,7 @@
       <div id="terminalView" style="display:none">
         <div class="terminal-header">
           <div class="session-info">
+            <button class="back-btn" onclick="goBack()" title="Back to sessions">&larr;</button>
             <h3 id="termSessionName">—</h3>
             <span class="model-badge" id="termModelBadge" style="display:none"></span>
           </div>
@@ -488,17 +627,35 @@
 
     // ── Auth ─────────────────────────────────────────────────
     function authenticate() {
-      token = document.getElementById('tokenInput').value.trim();
-      if (!token) {
-        showAuthError('Please enter a token');
+      const pin = document.getElementById('pinInput').value.trim();
+      if (!pin) {
+        showAuthError('Please enter a PIN');
         return;
       }
 
-      // Test token by hitting /health with auth
-      const port = window.location.port || location.port;
-      fetch(`/health`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+      // Try PIN-based unlock first, fall back to direct token auth
+      fetch('/dashboard/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
       })
+        .then(r => {
+          if (r.ok) return r.json();
+          if (r.status === 429) throw new Error('Too many attempts. Try again later.');
+          if (r.status === 403) return r.json().then(d => { throw new Error(d.error || 'Incorrect PIN'); });
+          // No PIN endpoint (404) — try as raw token
+          return null;
+        })
+        .then(data => {
+          if (data && data.token) {
+            token = data.token;
+          } else {
+            // Fall back: treat input as raw Bearer token
+            token = pin;
+          }
+          // Verify the token works
+          return fetch('/health', { headers: { 'Authorization': `Bearer ${token}` } });
+        })
         .then(r => {
           if (r.ok) {
             localStorage.setItem('instar_token', token);
@@ -506,10 +663,10 @@
             document.getElementById('app').style.display = 'grid';
             connectWebSocket();
           } else {
-            showAuthError('Invalid token');
+            showAuthError('Incorrect PIN');
           }
         })
-        .catch(() => showAuthError('Cannot connect to server'));
+        .catch(err => showAuthError(err.message || 'Cannot connect to server'));
     }
 
     function showAuthError(msg) {
@@ -522,7 +679,7 @@
     const stored = localStorage.getItem('instar_token');
     if (stored) {
       token = stored;
-      fetch(`/health`, { headers: { 'Authorization': `Bearer ${token}` } })
+      fetch('/health', { headers: { 'Authorization': `Bearer ${token}` } })
         .then(r => {
           if (r.ok) {
             document.getElementById('authOverlay').style.display = 'none';
@@ -533,8 +690,8 @@
         .catch(() => {});
     }
 
-    // Enter on token input
-    document.getElementById('tokenInput').addEventListener('keydown', e => {
+    // Enter on PIN input
+    document.getElementById('pinInput').addEventListener('keydown', e => {
       if (e.key === 'Enter') authenticate();
     });
 
@@ -674,7 +831,7 @@
         }
 
         const elapsed = formatElapsed(session.startedAt);
-        const model = session.model || 'sonnet';
+        const model = session.model || 'opus';
         const isActive = session.tmuxSession === activeSession;
 
         el.className = `session-item${isActive ? ' active' : ''}`;
@@ -697,6 +854,9 @@
       }
 
       activeSession = tmuxSession;
+
+      // Mobile: show terminal, hide sidebar
+      document.getElementById('app').classList.add('terminal-active');
 
       // Update UI
       document.getElementById('noSession').style.display = 'none';
@@ -757,7 +917,7 @@
           brightCyan: '#99f6e4',
           brightWhite: '#eee',
         },
-        fontSize: 13,
+        fontSize: window.innerWidth <= 768 ? 11 : 13,
         fontFamily: "'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace",
         cursorBlink: false,
         cursorStyle: 'underline',
@@ -788,6 +948,18 @@
       term.write(data);
       // Auto-scroll to bottom
       term.scrollToBottom();
+    }
+
+    function goBack() {
+      // Mobile: go back to session list
+      if (activeSession) {
+        wsSend({ type: 'unsubscribe', session: activeSession });
+      }
+      activeSession = null;
+      document.getElementById('app').classList.remove('terminal-active');
+      document.getElementById('terminalView').style.display = 'none';
+      document.getElementById('noSession').style.display = 'flex';
+      renderSessionList();
     }
 
     // ── Input ────────────────────────────────────────────────

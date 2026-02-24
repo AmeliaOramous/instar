@@ -45,7 +45,7 @@ export async function addJob(options: JobAddOptions): Promise<void> {
     schedule: options.schedule,
     priority: (options.priority || 'medium') as JobPriority,
     expectedDurationMinutes: 5,
-    model: (options.model || 'sonnet') as ModelTier,
+    model: (options.model || 'opus') as ModelTier,
     enabled: options.enabled !== false,
     execute: {
       type: (options.type || 'prompt') as 'skill' | 'prompt' | 'script',

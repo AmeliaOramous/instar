@@ -106,8 +106,9 @@ export class UpgradeGuideProcessor {
     }
 
     if (pending.length === 0) {
-      // All guides processed — clean up any stale pending file
-      this.cleanPendingGuide();
+      // All guides already delivered — don't touch the pending file.
+      // It may still be waiting for the agent to read and acknowledge it.
+      // Only `clearPendingGuide()` (via `instar upgrade-ack`) should remove it.
       return result;
     }
 

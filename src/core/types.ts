@@ -716,6 +716,8 @@ export interface InstarConfig {
   monitoring: MonitoringConfig;
   /** Auth token for API access (generated during setup) */
   authToken?: string;
+  /** PIN for dashboard web access (simpler than authToken, used for mobile/remote login) */
+  dashboardPin?: string;
   /** Relationship tracking config */
   relationships?: RelationshipManagerConfig;
   /** Feedback loop config */
