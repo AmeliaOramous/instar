@@ -509,7 +509,7 @@ export class JobScheduler {
         console.error(`[scheduler] Failed to send to job topic ${job.topicId}: ${err}`);
         // Topic may have been deleted — try to recreate
         try {
-          const newTopic = await this.telegram.createForumTopic(
+          const newTopic = await this.telegram.findOrCreateForumTopic(
             `Job: ${job.name}`,
             7322096, // Blue for jobs
           );
@@ -561,7 +561,7 @@ export class JobScheduler {
 
       // Create a new topic for this job
       try {
-        const topic = await this.telegram.createForumTopic(
+        const topic = await this.telegram.findOrCreateForumTopic(
           `Job: ${job.name}`,
           7322096, // Blue for automated jobs
         );

@@ -479,7 +479,7 @@ function wireTelegramRouting(
 
       (async () => {
         try {
-          const topic = await telegram.createForumTopic(topicName, 9367192); // Green
+          const topic = await telegram.findOrCreateForumTopic(topicName, 9367192); // Green, dedup by name
           const newSession = await sessionManager.spawnInteractiveSession(
             `[telegram:${topic.topicId}] New session started. (IMPORTANT: Relay all responses back via: cat <<'EOF' | .claude/scripts/telegram-reply.sh ${topic.topicId}\nYour response\nEOF)`,
             topicName,

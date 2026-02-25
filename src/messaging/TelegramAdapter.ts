@@ -374,6 +374,22 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   /**
+   * Find an existing topic by name, or create a new one if none exists.
+   * Prevents duplicate topics when sessions respawn or the server restarts.
+   */
+  async findOrCreateForumTopic(name: string, iconColor?: number): Promise<{ topicId: number; name: string; reused: boolean }> {
+    const normalizedName = name.toLowerCase().trim();
+    for (const [topicId, existingName] of this.topicToName) {
+      if (existingName.toLowerCase().trim() === normalizedName) {
+        console.log(`[telegram] Reusing existing topic ${topicId} for "${name}"`);
+        return { topicId, name: existingName, reused: true };
+      }
+    }
+    const result = await this.createForumTopic(name, iconColor);
+    return { ...result, reused: false };
+  }
+
+  /**
    * Get the Lifeline topic ID (if configured).
    */
   getLifelineTopicId(): number | undefined {
