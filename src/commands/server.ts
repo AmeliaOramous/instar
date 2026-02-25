@@ -1120,6 +1120,23 @@ export async function startServer(options: StartOptions): Promise<void> {
     // StallTriageNurse — LLM-powered session recovery
     let triageNurse: StallTriageNurse | undefined;
     if (config.monitoring.triage?.enabled && telegram) {
+      // Create intelligence provider for LLM-powered diagnosis.
+      // Prefer Anthropic API (faster, no tmux session needed) → Claude CLI fallback.
+      let triageIntelligence: IntelligenceProvider | undefined;
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          triageIntelligence = apiProvider;
+          console.log(pc.dim('  Triage Nurse: using Anthropic API for diagnosis'));
+        }
+      } catch { /* no API key available */ }
+      if (!triageIntelligence) {
+        try {
+          triageIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+          console.log(pc.dim('  Triage Nurse: using Claude CLI for diagnosis'));
+        } catch { /* CLI not available */ }
+      }
+
       triageNurse = new StallTriageNurse(
         {
           captureSessionOutput: (name, lines) => sessionManager.captureOutput(name, lines),
@@ -1136,14 +1153,12 @@ export async function startServer(options: StartOptions): Promise<void> {
           },
           sendToTopic: (topicId, text) => telegram!.sendToTopic(topicId, text),
           respawnSession: (name, topicId) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory),
-          clearStallForTopic: (topicId) => {
-            // Access the TelegramAdapter's internal stall tracking
-            // The sendToTopic call from the nurse will clear it naturally
-          },
+          clearStallForTopic: (topicId) => telegram!.clearStallTracking(topicId),
         },
         {
           config: config.monitoring.triage,
           state,
+          intelligence: triageIntelligence,
         },
       );
 

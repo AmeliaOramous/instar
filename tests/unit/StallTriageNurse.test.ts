@@ -298,7 +298,7 @@ describe('StallTriageNurse', () => {
       expect(result.diagnosis).not.toBeNull();
       expect(result.diagnosis!.action).toBe('nudge');
       expect(result.diagnosis!.confidence).toBe('low');
-      expect(result.diagnosis!.summary).toContain('LLM diagnosis failed');
+      expect(result.diagnosis!.summary).toContain('LLM diagnosis unavailable');
     });
 
     it('dead/missing sessions bypass LLM entirely', async () => {
@@ -555,6 +555,12 @@ describe('StallTriageNurse', () => {
       // Output stays the same
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue('some output');
 
+      // After exhausted escalations, nurse force-restarts. Mock isSessionAlive to
+      // return true for gatherContext but false after the force-restart so it fails.
+      (deps.isSessionAlive as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(true)   // gatherContext
+        .mockReturnValueOnce(false); // force-restart verification
+
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
       expect(result.resolved).toBe(false);
@@ -573,6 +579,12 @@ describe('StallTriageNurse', () => {
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>)
         .mockReturnValueOnce('some output')
         .mockReturnValueOnce(null);
+
+      // After exhausted escalations, nurse force-restarts. Mock isSessionAlive to
+      // return true for gatherContext but false after the force-restart so it fails.
+      (deps.isSessionAlive as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(true)   // gatherContext
+        .mockReturnValueOnce(false); // force-restart verification
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
@@ -781,13 +793,15 @@ describe('StallTriageNurse', () => {
       });
 
       // First verify (nudge): same output = fail
-      // Second verify (interrupt): changed output = success
+      // Second verify (interrupt): output with work indicators = success
+      // Verification now requires work indicators (new occurrences of Read/Write/etc.) or 100+ char growth
       let verifyCallCount = 0;
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockImplementation(() => {
         verifyCallCount++;
         if (verifyCallCount <= 1) return 'some output';     // gatherContext
         if (verifyCallCount === 2) return 'some output';     // verify nudge: same = fail
-        return 'new output after interrupt';                  // verify interrupt: different = success
+        if (verifyCallCount === 3) return 'some output';     // re-capture context before interrupt verify
+        return 'some output\nRead tool output... telegram-reply completed successfully with new content here';  // verify interrupt: has work indicators
       });
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
@@ -804,13 +818,15 @@ describe('StallTriageNurse', () => {
         intelligence: mockIntelligence as any,
       });
 
-      // nudge fails, interrupt fails, unstick succeeds
+      // nudge fails, interrupt fails, unstick succeeds (with work indicators)
+      // Verification now requires work indicators or 100+ char growth.
+      // captureSessionOutput calls: gatherContext(1), verifyNudge(2), re-captureBeforeInterrupt(3),
+      //   verifyInterrupt(4), re-captureBeforeUnstick(5), verifyUnstick(6)
       let verifyCallCount = 0;
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockImplementation(() => {
         verifyCallCount++;
-        if (verifyCallCount <= 1) return 'some output';     // gatherContext
-        if (verifyCallCount <= 3) return 'some output';     // verify nudge + interrupt: same
-        return 'new output after unstick';                   // verify unstick: success
+        if (verifyCallCount <= 5) return 'some output';     // gatherContext + verify nudge/interrupt + re-captures: same
+        return 'some output\nWrite tool completed... Bash executed successfully with new content appended here';  // verify unstick: has work indicators
       });
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
@@ -829,11 +845,18 @@ describe('StallTriageNurse', () => {
       // All verifications fail
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue('some output');
 
+      // After exhausted escalations, nurse force-restarts since restart wasn't tried yet.
+      // Mock isSessionAlive: true for gatherContext, false after force-restart so it fails.
+      (deps.isSessionAlive as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(true)   // gatherContext
+        .mockReturnValueOnce(false); // force-restart verification
+
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
       expect(result.resolved).toBe(false);
       expect(result.fallbackReason).toBe('max_escalations_reached');
-      expect(result.actionsTaken).toEqual(['nudge', 'interrupt']);
+      // Now includes the force-restart attempt after escalations
+      expect(result.actionsTaken).toEqual(['nudge', 'interrupt', 'restart']);
     });
 
     it('sets fallbackReason when escalations exhausted', async () => {
@@ -844,6 +867,12 @@ describe('StallTriageNurse', () => {
       });
 
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue('some output');
+
+      // After exhausted escalations, nurse force-restarts. Mock isSessionAlive to
+      // return true for gatherContext but false after the force-restart so it fails.
+      (deps.isSessionAlive as ReturnType<typeof vi.fn>)
+        .mockReturnValueOnce(true)   // gatherContext
+        .mockReturnValueOnce(false); // force-restart verification
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 

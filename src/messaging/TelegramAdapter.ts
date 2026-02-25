@@ -660,6 +660,14 @@ export class TelegramAdapter implements MessagingAdapter {
     }
   }
 
+  /**
+   * Public interface for external callers (e.g., StallTriageNurse) to clear
+   * stall tracking for a topic after successful recovery.
+   */
+  clearStallTracking(topicId: number): void {
+    this.clearStallForTopic(topicId);
+  }
+
   private async checkForStalls(): Promise<void> {
     const stallMinutes = this.config.stallTimeoutMinutes ?? 5;
     const stallThresholdMs = stallMinutes * 60 * 1000;

@@ -239,9 +239,17 @@ export class StallTriageNurse extends EventEmitter {
         return result;
       }
 
-      // Escalation loop
+      // Escalation loop — each step is more aggressive, with user-visible status updates
       let currentActionIndex = ACTION_ESCALATION_ORDER.indexOf(lastDiagnosis.action);
       let escalations = 0;
+
+      const ACTION_DESCRIPTIONS: Record<TreatmentAction, string> = {
+        status_update: 'checking status',
+        nudge: 'nudging the session',
+        interrupt: 'sending interrupt signal',
+        unstick: 'killing stuck process',
+        restart: 'restarting the session with full conversation context',
+      };
 
       while (escalations < this.config.maxEscalations && currentActionIndex < ACTION_ESCALATION_ORDER.length - 1) {
         escalations++;
@@ -253,9 +261,13 @@ export class StallTriageNurse extends EventEmitter {
         this.emit('triage:escalated', { topicId, from: prevAction, to: nextAction });
         console.log(`[StallTriageNurse] Escalating from ${prevAction} to ${nextAction} for topic ${topicId}`);
 
-        const escalationMessage = `Previous recovery didn't work. Trying ${nextAction}...`;
+        const desc = ACTION_DESCRIPTIONS[nextAction] || nextAction;
+        const escalationMessage = `That didn't work. Escalating — ${desc}...`;
         await this.executeAction(nextAction, context, escalationMessage);
         this.emit('triage:treated', { topicId, action: nextAction });
+
+        // Re-capture context for verification (output may have changed from previous action)
+        context.tmuxOutput = this.deps.captureSessionOutput(sessionName, 50)?.slice(-3000) || '';
 
         const escalationRecovered = await this.verifyAction(nextAction, context);
         if (escalationRecovered) {
@@ -267,8 +279,31 @@ export class StallTriageNurse extends EventEmitter {
         }
       }
 
-      // Exhausted all escalations
+      // If we haven't tried restart yet and all else failed, force restart
+      if (!actionsTaken.includes('restart')) {
+        actionsTaken.push('restart');
+        const restartMsg = `Recovery attempts exhausted. Restarting session with full conversation context...`;
+        await this.executeAction('restart', context, restartMsg);
+        this.emit('triage:treated', { topicId, action: 'restart' });
+        this.deps.clearStallForTopic(topicId);
+
+        // Verify restart
+        await this.delay(this.config.verifyDelayMs);
+        if (this.deps.isSessionAlive(sessionName)) {
+          this.emit('triage:resolved', { topicId, actionsTaken });
+          const result: TriageResult = { resolved: true, actionsTaken, diagnosis: lastDiagnosis, trigger };
+          this.recordResult(topicId, sessionName, result);
+          return result;
+        }
+      }
+
+      // Exhausted all escalations — notify user with actionable instructions
       const failReason = 'max_escalations_reached';
+      await this.deps.sendToTopic(topicId,
+        `I wasn't able to recover the session automatically. You can:\n` +
+        `• Send a new message to this topic (will auto-spawn a fresh session)\n` +
+        `• Use /restart to force a fresh start`
+      ).catch(() => {});
       this.emit('triage:failed', { topicId, reason: failReason, actionsTaken });
       const result: TriageResult = {
         resolved: false, actionsTaken, diagnosis: lastDiagnosis,
@@ -341,13 +376,31 @@ export class StallTriageNurse extends EventEmitter {
 
       return this.parseDiagnosis(rawResponse);
     } catch (err) {
-      console.warn(`[StallTriageNurse] LLM diagnosis failed, falling back to nudge:`, err);
-      return {
-        summary: `LLM diagnosis failed: ${err instanceof Error ? err.message : String(err)}`,
-        action: 'nudge',
-        confidence: 'low',
-        userMessage: `Session "${context.sessionName}" isn't responding. Trying to nudge it...`,
-      };
+      console.warn(`[StallTriageNurse] LLM diagnosis failed, using heuristic:`, err);
+
+      // Heuristic fallback — smarter than always defaulting to nudge.
+      // Check terminal output for clues about what's wrong.
+      const output = context.tmuxOutput || '';
+      let action: TreatmentAction = 'nudge';
+      let summary = 'LLM diagnosis unavailable, using heuristic';
+      let userMessage = `Session "${context.sessionName}" isn't responding. Trying to nudge it...`;
+
+      if (context.sessionStatus === 'missing' || context.sessionStatus === 'dead') {
+        action = 'restart';
+        summary = `Session ${context.sessionStatus} (heuristic)`;
+        userMessage = `Session "${context.sessionName}" has stopped. Restarting it now...`;
+      } else if (output.includes('error') || output.includes('Error') || output.includes('SIGTERM') || output.includes('exited')) {
+        action = 'restart';
+        summary = 'Terminal shows error/exit indicators (heuristic)';
+        userMessage = `Session "${context.sessionName}" appears to have crashed. Restarting it...`;
+      } else if (context.waitMinutes >= 5) {
+        // If waiting 5+ minutes with a live session, nudge is unlikely to help — go straight to interrupt
+        action = 'interrupt';
+        summary = `Session alive but unresponsive for ${context.waitMinutes} min (heuristic)`;
+        userMessage = `Session "${context.sessionName}" has been unresponsive for ${context.waitMinutes} minutes. Trying to interrupt it...`;
+      }
+
+      return { summary, action, confidence: 'low', userMessage };
     }
   }
 
@@ -504,9 +557,29 @@ export class StallTriageNurse extends EventEmitter {
       return this.deps.isSessionAlive(context.sessionName);
     }
 
-    // For nudge/interrupt/unstick: check if tmux output changed
-    const newOutput = this.deps.captureSessionOutput(context.sessionName, 50);
-    return newOutput !== null && newOutput !== context.tmuxOutput;
+    // For nudge/interrupt/unstick: check if the session is actively working.
+    // Just checking "did tmux output change?" is too weak — sending Enter produces
+    // output (a new prompt line) without actually recovering the session.
+    // Instead, check for signs of active tool use or message processing.
+    const newOutput = this.deps.captureSessionOutput(context.sessionName, 50) || '';
+
+    // If output is identical to before, definitely not recovered
+    if (newOutput === context.tmuxOutput) return false;
+
+    // Look for signs of actual work happening (tool calls, telegram-reply, processing)
+    const workIndicators = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'telegram-reply', 'cat <<', 'thinking', 'tool_use'];
+    const hasWorkActivity = workIndicators.some(indicator => {
+      // Check if this indicator is NEW (not in the old output)
+      const oldCount = (context.tmuxOutput || '').split(indicator).length;
+      const newCount = newOutput.split(indicator).length;
+      return newCount > oldCount;
+    });
+
+    if (hasWorkActivity) return true;
+
+    // If no clear work indicators, check if output grew significantly (not just a newline)
+    const outputGrowth = newOutput.length - (context.tmuxOutput || '').length;
+    return outputGrowth > 100;  // Meaningful output, not just a prompt echo
   }
 
   // ─── State Persistence ────────────────────────────────────
