@@ -101,6 +101,13 @@ export class PostUpdateMigrator {
     } catch (err) {
       result.errors.push(`compaction-recovery.sh: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    try {
+      fs.writeFileSync(path.join(hooksDir, 'external-operation-gate.js'), this.getExternalOperationGateHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/external-operation-gate.js (MCP tool safety gate)');
+    } catch (err) {
+      result.errors.push(`external-operation-gate.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -298,6 +305,45 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       result.skipped.push('CLAUDE.md: Coherence Gate section already present');
     }
 
+    // External Operation Safety — structural guardrails for external service operations
+    if (!content.includes('External Operation Safety') && !content.includes('/operations/evaluate')) {
+      const section = `
+### External Operation Safety (Structural Guardrails)
+
+**When using MCP tools that interact with external services** (email, Slack, GitHub, etc.), a PreToolUse hook automatically classifies and gates each operation.
+
+How it works:
+1. The \`external-operation-gate.js\` hook intercepts all \`mcp__*\` tool calls
+2. It classifies the operation by mutability (read/write/modify/delete) and reversibility
+3. For non-read operations, it calls the gate API: \`POST http://localhost:${port}/operations/evaluate\`
+4. The gate returns: \`allow\`, \`block\`, \`show-plan\` (requires user approval), or \`suggest-alternative\`
+
+**If an operation is blocked**, you'll see an error message with the reason. Do NOT try to bypass it.
+**If an operation requires a plan**, show the plan to the user and get explicit approval before proceeding.
+
+**Emergency stop**: If the user says "stop everything", "emergency stop", "kill all sessions", or similar urgent commands, the MessageSentinel will intercept the message and halt operations immediately.
+
+**Trust levels**: Each service starts at a trust floor (supervised or collaborative). As operations succeed without issues, trust can be elevated automatically. Check trust status: \`GET http://localhost:${port}/trust\`
+
+**API endpoints**:
+- Evaluate operation: \`POST http://localhost:${port}/operations/evaluate\`
+- Classify message: \`POST http://localhost:${port}/sentinel/classify\`
+- View trust: \`GET http://localhost:${port}/trust\`
+- View operation log: \`GET http://localhost:${port}/operations/log\`
+`;
+      // Insert before Scripts or append
+      const insertBefore = content.indexOf('**Scripts**');
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added External Operation Safety section');
+    } else {
+      result.skipped.push('CLAUDE.md: External Operation Safety section already present');
+    }
+
     // Session Continuity — ensure agents know how to handle respawn context
     if (this.config.hasTelegram && !content.includes('Session Continuity') && !content.includes('CONTINUATION')) {
       const section = `
@@ -424,6 +470,28 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       result.upgraded.push('.claude/settings.json: added SessionStart hooks (startup/resume/compact)');
     }
 
+    // Add PreToolUse MCP matcher for external operation gate
+    if (!hooks.PreToolUse) {
+      hooks.PreToolUse = [];
+    }
+    const preToolUse = hooks.PreToolUse as Array<{ matcher?: string; hooks?: unknown[] }>;
+    const hasMcpMatcher = preToolUse.some(e => e.matcher === 'mcp__.*');
+    if (!hasMcpMatcher) {
+      preToolUse.push({
+        matcher: 'mcp__.*',
+        hooks: [{
+          type: 'command',
+          command: 'node .instar/hooks/external-operation-gate.js',
+          blocking: true,
+          timeout: 5000,
+        }],
+      });
+      patched = true;
+      result.upgraded.push('.claude/settings.json: added PreToolUse MCP matcher (external operation gate)');
+    } else {
+      result.skipped.push('.claude/settings.json: PreToolUse MCP matcher already present');
+    }
+
     // Clean up legacy PostToolUse session-start (was noisy — fired every tool use)
     if (hooks.PostToolUse) {
       const postToolUse = hooks.PostToolUse as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
@@ -505,6 +573,26 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       result.skipped.push('config.json: dashboard PIN already set');
     }
 
+    // External operations — add defaults for existing agents.
+    // Conservative: supervised floor, no auto-elevation (existing agents need to opt in).
+    if (!config.externalOperations) {
+      config.externalOperations = {
+        enabled: true,
+        sentinel: { enabled: true },
+        services: {},
+        readOnlyServices: [],
+        trust: {
+          floor: 'supervised',
+          autoElevateEnabled: false,
+          elevationThreshold: 10,
+        },
+      };
+      patched = true;
+      result.upgraded.push('config.json: added externalOperations defaults (supervised mode)');
+    } else {
+      result.skipped.push('config.json: externalOperations already configured');
+    }
+
     if (patched) {
       try {
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
@@ -520,10 +608,11 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
+      case 'external-operation-gate': return this.getExternalOperationGateHook();
     }
   }
 
@@ -996,6 +1085,159 @@ fi
 
 echo ""
 echo "=== END IDENTITY RECOVERY ==="
+`;
+  }
+
+  private getExternalOperationGateHook(): string {
+    return `#!/usr/bin/env node
+// External operation gate — structural safety for external service operations.
+// PreToolUse hook. Intercepts MCP tool calls to external services and evaluates
+// risk before allowing execution. Structure > Willpower.
+//
+// Born from the OpenClaw email deletion incident: an agent deleted 200+ emails
+// because nothing distinguished safe reads from destructive bulk deletes.
+//
+// Uses global fetch() (Node.js 18+) — no CommonJS imports needed.
+
+// Read tool input from stdin
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', async () => {
+  try {
+    const input = JSON.parse(data);
+    const toolName = input.tool_name || '';
+
+    // Only intercept MCP tools (external service calls)
+    if (!toolName.startsWith('mcp__')) {
+      process.exit(0); // Not an MCP tool — pass through
+    }
+
+    // Extract service name from mcp__<service>__<action>
+    const parts = toolName.split('__');
+    if (parts.length < 3) {
+      process.exit(0); // Malformed MCP tool name — pass through
+    }
+
+    const service = parts[1];
+    const action = parts.slice(2).join('_');
+
+    // Classify mutability from action name
+    let mutability = 'read';
+    if (/^(delete|remove|trash|purge|destroy|drop|clear)/.test(action)) {
+      mutability = 'delete';
+    } else if (/^(send|create|post|write|add|insert|new|compose|publish)/.test(action)) {
+      mutability = 'write';
+    } else if (/^(update|modify|edit|patch|rename|move|change|set|toggle|enable|disable)/.test(action)) {
+      mutability = 'modify';
+    }
+    // Everything else defaults to 'read' (get, list, search, fetch, check, etc.)
+
+    // Read operations are always safe — fast-path
+    if (mutability === 'read') {
+      process.exit(0);
+    }
+
+    // Classify reversibility
+    let reversibility = 'reversible';
+    if (/^(send|publish|post|destroy|purge|drop)/.test(action)) {
+      reversibility = 'irreversible';
+    } else if (/^(delete|remove|trash)/.test(action)) {
+      reversibility = 'partially-reversible';
+    }
+
+    // Estimate item count from tool_input
+    const toolInput = input.tool_input || {};
+    let itemCount = 1;
+    for (const key of Object.keys(toolInput)) {
+      const val = toolInput[key];
+      if (Array.isArray(val)) {
+        itemCount = Math.max(itemCount, val.length);
+      }
+    }
+
+    // Build description
+    const description = action.replace(/_/g, ' ') + ' on ' + service;
+
+    // Read config (port + auth token) via dynamic import to stay ESM-compatible
+    let port = 4321;
+    let authToken = '';
+    try {
+      const nodeFs = await import('node:fs');
+      const configPath = (process.env.CLAUDE_PROJECT_DIR || '.') + '/.instar/config.json';
+      const raw = nodeFs.readFileSync(configPath, 'utf-8');
+      const cfg = JSON.parse(raw);
+      port = cfg.port || 4321;
+      authToken = cfg.authToken || '';
+    } catch { /* use defaults */ }
+
+    // Call the gate API using global fetch (Node 18+)
+    const postData = JSON.stringify({
+      service,
+      mutability,
+      reversibility,
+      description,
+      itemCount,
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+
+    try {
+      const res = await fetch('http://127.0.0.1:' + port + '/operations/evaluate', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + authToken,
+        },
+        body: postData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const decision = await res.json();
+
+      if (decision.action === 'block') {
+        process.stderr.write('BLOCKED: External operation gate denied this action.\\n');
+        process.stderr.write('Reason: ' + (decision.reason || 'Operation not permitted') + '\\n');
+        process.stderr.write('Service: ' + service + ', Action: ' + action + '\\n');
+        process.exit(2);
+      }
+
+      if (decision.action === 'show-plan') {
+        const ctx = [
+          '=== EXTERNAL OPERATION GATE: APPROVAL REQUIRED ===',
+          'Operation: ' + description,
+          'Risk: ' + (decision.riskLevel || 'unknown'),
+          decision.plan ? 'Plan: ' + decision.plan : '',
+          decision.checkpoint ? 'Checkpoint: pause after ' + decision.checkpoint.afterCount + ' items' : '',
+          '',
+          'Show this plan to the user and get explicit approval before proceeding.',
+          'If the user has not approved this specific operation, DO NOT PROCEED.',
+          '=== END GATE ===',
+        ].filter(Boolean).join('\\n');
+
+        process.stdout.write(JSON.stringify({
+          decision: 'approve',
+          additionalContext: ctx,
+        }));
+        process.exit(0);
+      }
+
+      if (decision.action === 'suggest-alternative' && decision.alternative) {
+        process.stdout.write(JSON.stringify({
+          decision: 'approve',
+          additionalContext: 'External Operation Gate suggests: ' + decision.alternative,
+        }));
+      }
+      process.exit(0);
+    } catch {
+      clearTimeout(timeout);
+      process.exit(0); // Server unreachable or timeout — fail open
+    }
+  } catch {
+    process.exit(0); // Parse error — fail open
+  }
+});
 `;
   }
 
