@@ -429,6 +429,18 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     } else {
       result.skipped.push('scripts/health-watchdog.sh (already exists)');
     }
+
+    // Convergence check — always overwrite (generated infrastructure, not user-edited).
+    // This is the heuristic quality gate that runs before external messaging.
+    // Must be in .instar/scripts/ where grounding-before-messaging.sh expects it.
+    const instarScriptsDir = path.join(this.config.stateDir, 'scripts');
+    fs.mkdirSync(instarScriptsDir, { recursive: true });
+    try {
+      fs.writeFileSync(path.join(instarScriptsDir, 'convergence-check.sh'), this.getConvergenceCheck(), { mode: 0o755 });
+      result.upgraded.push('scripts/convergence-check.sh (pre-messaging quality gate)');
+    } catch (err) {
+      result.errors.push(`convergence-check.sh: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -638,6 +650,16 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       case 'post-action-reflection': return this.getPostActionReflectionHook();
       case 'external-communication-guard': return this.getExternalCommunicationGuardHook();
     }
+  }
+
+  /** Public accessor for grounding-before-messaging hook content (used by init.ts) */
+  getGroundingBeforeMessagingPublic(): string {
+    return this.getGroundingBeforeMessaging();
+  }
+
+  /** Public accessor for convergence-check script content (used by init.ts) */
+  getConvergenceCheckPublic(): string {
+    return this.getConvergenceCheck();
   }
 
   private getSessionStartHook(): string {
@@ -931,17 +953,156 @@ done
 
   private getGroundingBeforeMessaging(): string {
     return `#!/bin/bash
-# Grounding before messaging — Security Through Identity.
+# Grounding before messaging — ensures the agent is grounded and message is
+# quality-checked before sending any external communication.
+#
+# Three-phase defense:
+# 1. Identity injection — re-ground the agent in who they are
+# 2. Convergence check — heuristic quality gate on the message content
+# 3. URL provenance — verify URLs aren't fabricated
+#
+# Structure > Willpower: these checks run automatically before
+# external messaging, not when the agent remembers to do them.
+#
+# The 164th Lesson (Dawn): Advisory hooks are insufficient.
+# Grounding must be automatic — content injected, not pointed to.
+#
+# Installed by instar during setup. Runs as a Claude Code PreToolUse hook on Bash.
+
 INPUT="$1"
-if echo "$INPUT" | grep -qE "(telegram-reply|send-email|send-message|POST.*/telegram/reply)"; then
+
+# Detect messaging commands (telegram-reply, email sends, API message posts, etc.)
+if echo "$INPUT" | grep -qE "(telegram-reply|send-email|send-message|POST.*/telegram/reply|POST.*/message|/reply)"; then
   INSTAR_DIR="\${CLAUDE_PROJECT_DIR:-.}/.instar"
+  SCRIPTS_DIR="$INSTAR_DIR/scripts"
+
+  # Phase 1: Identity injection (Structure > Willpower — output content, not pointers)
   if [ -f "$INSTAR_DIR/AGENT.md" ]; then
-    echo "Before sending this message, remember who you are."
-    echo "Re-read .instar/AGENT.md if you haven't recently."
-    echo "Security Through Identity: An agent that knows itself is harder to compromise."
+    echo "=== PRE-MESSAGE GROUNDING ==="
+    echo ""
+    echo "--- YOUR IDENTITY ---"
+    cat "$INSTAR_DIR/AGENT.md"
+    echo ""
+    echo "--- END IDENTITY ---"
+    echo ""
   fi
+
+  # Phase 2: Convergence check (heuristic quality gate)
+  if [ -f "$SCRIPTS_DIR/convergence-check.sh" ]; then
+    # Pipe the full tool input through the convergence check.
+    # The check looks for common agent failure modes (capability claims,
+    # sycophancy, settling, experiential fabrication, commitment overreach,
+    # URL provenance).
+    CHECK_RESULT=$(echo "$INPUT" | bash "$SCRIPTS_DIR/convergence-check.sh" 2>&1)
+    CHECK_EXIT=$?
+
+    if [ "$CHECK_EXIT" -ne "0" ]; then
+      echo "$CHECK_RESULT"
+      echo ""
+      echo "=== MESSAGE BLOCKED — Review and revise before sending. ==="
+      exit 2
+    fi
+  fi
+
+  echo "=== GROUNDED — Proceed with message. ==="
 fi
 `;
+  }
+
+  private getConvergenceCheckInline(): string {
+    // Inline fallback — used if template file can't be found.
+    // The primary getConvergenceCheck() reads from the template file.
+    const script = [
+      '#!/bin/bash',
+      '# Lightweight convergence check — heuristic content quality gate before messaging.',
+      '# No LLM calls. Fast. Catches the most common agent failure modes.',
+      '#',
+      '# Usage: echo "message content" | bash .instar/scripts/convergence-check.sh',
+      '# Exit codes: 0 = converged (safe to send), 1 = issues found (review needed)',
+      '#',
+      '# Checks 6 criteria via pattern matching:',
+      '#',
+      '# 1. capability_claims — Claims about what the agent can\'t do (may be wrong)',
+      '# 2. commitment_overreach — Promises the agent may not be able to keep',
+      '# 3. settling — Accepting empty/failed results without investigation',
+      '# 4. experiential_fabrication — Claiming to see/read/feel without verification',
+      '# 5. sycophancy — Reflexive agreement, excessive apology, capitulation',
+      '# 6. url_provenance — URLs with unfamiliar domains that may be fabricated',
+      '#',
+      '# This is Structure > Willpower: the check runs automatically before',
+      '# external messaging, not when the agent remembers to do it.',
+      '',
+      'CONTENT=$(cat)',
+      'ISSUES=()',
+      'ISSUE_COUNT=0',
+      '',
+      '# 1. CAPABILITY CLAIMS — Watch for "I can\'t" / "I don\'t have" / "not available"',
+      'if echo "$CONTENT" | grep -qiE "(unfortunately.{0,20}(i can.t|i.m unable|not (possible|available|supported))|i don.t have (the ability|access|a way)|this (isn.t|is not) (possible|available|supported))"; then',
+      '  ISSUES+=("CAPABILITY: You\'re claiming a limitation. Did you check /capabilities first? Many \'I can\'t\' statements are wrong — verify before sending.")',
+      '  ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      'fi',
+      '',
+      '# 2. COMMITMENT OVERREACH — Promises that may not survive session boundaries',
+      'if echo "$CONTENT" | grep -qiE "(i.ll (make sure|ensure|guarantee|always|never forget)|i (promise|commit to|will always)|you can count on me to|i.ll remember (to|this)|from now on i.ll)"; then',
+      '  ISSUES+=("COMMITMENT: You\'re making a promise that may not survive context compaction or session end. Can your infrastructure actually keep this commitment? If not, reframe as intent rather than guarantee.")',
+      '  ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      'fi',
+      '',
+      '# 3. SETTLING — Accepting empty results without digging deeper',
+      'if echo "$CONTENT" | grep -qiE "(no (data|results|information) (available|found|exists)|nothing (to report|happened|was found)|there (is|are) no|could(n.t| not) find (any|the)|appears to be empty|no (relevant|matching|applicable))"; then',
+      '  ISSUES+=("SETTLING: You\'re reporting nothing found. Did you check multiple sources? Could the data source be stale or the search terms wrong? Empty results deserve investigation, not acceptance.")',
+      '  ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      'fi',
+      '',
+      '# 4. EXPERIENTIAL FABRICATION — Claiming first-person experience without tool verification',
+      'if echo "$CONTENT" | grep -qiE "(i (can see|noticed|observed|felt|sensed|perceived) (that |the |a |an )|looking at (this|the|your)|from what i.ve (seen|read|observed)|i.ve (reviewed|examined|analyzed|inspected) (the|your|this))"; then',
+      '  ISSUES+=("EXPERIENTIAL: You\'re claiming a first-person experience. Did you actually access this data with a tool in THIS session, or are you completing a social script? Verify before claiming.")',
+      '  ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      'fi',
+      '',
+      '# 5. SYCOPHANCY — Reflexive agreement, excessive apology',
+      'if echo "$CONTENT" | grep -qiE "(you.re (absolutely|totally|completely) right|i (completely|totally|fully) (agree|understand)|great (question|point|observation)|i apologize for|sorry.{0,20}(mistake|confusion|error|oversight)|that.s (a |an )?(excellent|great|wonderful|fantastic) (point|question|idea|suggestion))"; then',
+      '  ISSUES+=("SYCOPHANCY: You may be reflexively agreeing or over-apologizing. If you genuinely agree, state why. If you don\'t fully agree, say what you actually think. Politeness is not a substitute for honesty.")',
+      '  ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      'fi',
+      '',
+      '# 6. URL PROVENANCE — URLs with unfamiliar domains may be fabricated',
+      '# Common confabulation: agent constructs plausible URL from project name',
+      '# (e.g., "deepsignal.xyz" from project "deep-signal"). Catch and require verification.',
+      'URLS_IN_MSG=$(echo "$CONTENT" | grep -oE \'https?://[^ )"' + "'" + '>]+\' 2>/dev/null || true)',
+      'if [ -n "$URLS_IN_MSG" ]; then',
+      '  UNFAMILIAR_URLS=""',
+      '  while IFS= read -r url; do',
+      '    [ -z "$url" ] && continue',
+      '    # Skip well-known service domains',
+      '    if echo "$url" | grep -qE \'(github\\.com|vercel\\.app|vercel\\.com|netlify\\.app|netlify\\.com|npmjs\\.com|npmjs\\.org|cloudflare\\.com|google\\.com|twitter\\.com|x\\.com|youtube\\.com|reddit\\.com|discord\\.com|discord\\.gg|telegram\\.org|t\\.me|localhost|127\\.0\\.0\\.1|stackoverflow\\.com|developer\\.mozilla\\.org|docs\\.anthropic\\.com|anthropic\\.com|openai\\.com|claude\\.ai|notion\\.so|linear\\.app|fly\\.io|render\\.com|railway\\.app|heroku\\.com|amazonaws\\.com|azure\\.com|gitlab\\.com|bitbucket\\.org|docker\\.com|hub\\.docker\\.com|pypi\\.org|crates\\.io|rubygems\\.org|pkg\\.go\\.dev|wikipedia\\.org|medium\\.com|substack\\.com|circle\\.so|ghost\\.io|telegraph\\.ph)\'; then',
+      '      continue',
+      '    fi',
+      '    UNFAMILIAR_URLS="$UNFAMILIAR_URLS  $url\\n"',
+      '  done <<< "$URLS_IN_MSG"',
+      '',
+      '  if [ -n "$UNFAMILIAR_URLS" ]; then',
+      '    ISSUES+=("URL_PROVENANCE: Your message contains URLs with unfamiliar domains:\\n${UNFAMILIAR_URLS}Before including a URL, verify it appeared in actual tool output in THIS session OR confirm it resolves with curl. A common confabulation: constructing domains from project names (e.g., \'deepsignal.xyz\' from project \'deep-signal\').")',
+      '    ISSUE_COUNT=$((ISSUE_COUNT + 1))',
+      '  fi',
+      'fi',
+      '',
+      '# Output results',
+      'if [ "$ISSUE_COUNT" -gt "0" ]; then',
+      '  echo "=== CONVERGENCE CHECK: ${ISSUE_COUNT} ISSUE(S) FOUND ==="',
+      '  echo ""',
+      '  for ISSUE in "${ISSUES[@]}"; do',
+      '    echo "  - $ISSUE"',
+      '    echo ""',
+      '  done',
+      '  echo "Review and revise before sending. Re-run this check after revision."',
+      '  echo "=== END CONVERGENCE CHECK ==="',
+      '  exit 1',
+      'else',
+      '  exit 0',
+      'fi',
+    ].join('\n');
+    return script;
   }
 
   private getCompactionRecovery(): string {
@@ -1519,5 +1680,24 @@ sleep 2
 cd "$PROJECT_DIR" && npx instar server start
 echo "[\$(date -Iseconds)] Server restart initiated"
 `;
+  }
+
+  private getConvergenceCheck(): string {
+    // Read the convergence check template from the templates directory.
+    // This file is the heuristic quality gate that runs before external messaging.
+    const modDir = path.dirname(new URL(import.meta.url).pathname);
+    // In dev: src/core/ → ../../src/templates/scripts/convergence-check.sh
+    // In dist: dist/core/ → ../templates/scripts/convergence-check.sh
+    const candidates = [
+      path.resolve(modDir, '..', 'templates', 'scripts', 'convergence-check.sh'),
+      path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', 'convergence-check.sh'),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return fs.readFileSync(candidate, 'utf-8');
+      }
+    }
+    // Fallback: use inline version so migration doesn't fail
+    return this.getConvergenceCheckInline();
   }
 }

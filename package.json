@@ -50,6 +50,7 @@
     "dist",
     "dashboard",
     "upgrades",
+    "src/templates",
     ".claude/skills/setup-wizard"
   ],
   "license": "MIT",

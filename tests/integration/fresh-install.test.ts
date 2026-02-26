@@ -169,6 +169,27 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(stats.mode & 0o111).toBeGreaterThan(0);
   });
 
+  it('installs convergence-check.sh in .instar/scripts/', () => {
+    const checkPath = path.join(projectDir, '.instar', 'scripts', 'convergence-check.sh');
+    expect(fs.existsSync(checkPath)).toBe(true);
+
+    const stats = fs.statSync(checkPath);
+    expect(stats.mode & 0o111).toBeGreaterThan(0); // executable
+
+    const content = fs.readFileSync(checkPath, 'utf-8');
+    expect(content).toContain('CONVERGENCE CHECK');
+    expect(content).toContain('URL_PROVENANCE'); // URL provenance check present
+    expect(content).toContain('EXPERIENTIAL'); // experiential fabrication check present
+  });
+
+  it('grounding-before-messaging.sh calls convergence check', () => {
+    const hookPath = path.join(projectDir, '.instar', 'hooks', 'grounding-before-messaging.sh');
+    const content = fs.readFileSync(hookPath, 'utf-8');
+    expect(content).toContain('convergence-check.sh'); // references convergence check
+    expect(content).toContain('PRE-MESSAGE GROUNDING'); // identity injection phase
+    expect(content).toContain('AGENT.md'); // injects identity
+  });
+
   it('creates .gitignore with state exclusions', () => {
     const gitignorePath = path.join(projectDir, '.gitignore');
     expect(fs.existsSync(gitignorePath)).toBe(true);

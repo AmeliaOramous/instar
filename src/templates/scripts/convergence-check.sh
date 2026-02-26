@@ -6,13 +6,14 @@
 # Exit codes: 0 = converged (safe to send), 1 = issues found (review needed)
 #
 # Inspired by Dawn's convergence-check.py (PROP-159) but simplified for
-# generic agents. Checks 5 criteria via pattern matching:
+# generic agents. Checks 6 criteria via pattern matching:
 #
 # 1. capability_claims — Claims about what the agent can't do (may be wrong)
 # 2. commitment_overreach — Promises the agent may not be able to keep
 # 3. settling — Accepting empty/failed results without investigation
 # 4. experiential_fabrication — Claiming to see/read/feel without verification
 # 5. sycophancy — Reflexive agreement, excessive apology, capitulation
+# 6. url_provenance — URLs with unfamiliar domains that may be fabricated
 #
 # This is Structure > Willpower: the check runs automatically before
 # external messaging, not when the agent remembers to do it.
@@ -49,6 +50,28 @@ fi
 if echo "$CONTENT" | grep -qiE "(you.re (absolutely|totally|completely) right|i (completely|totally|fully) (agree|understand)|great (question|point|observation)|i apologize for|sorry.{0,20}(mistake|confusion|error|oversight)|that.s (a |an )?(excellent|great|wonderful|fantastic) (point|question|idea|suggestion))"; then
   ISSUES+=("SYCOPHANCY: You may be reflexively agreeing or over-apologizing. If you genuinely agree, state why. If you don't fully agree, say what you actually think. Politeness is not a substitute for honesty.")
   ISSUE_COUNT=$((ISSUE_COUNT + 1))
+fi
+
+# 6. URL PROVENANCE — URLs with unfamiliar domains may be fabricated
+# Common confabulation: agent constructs plausible URL from project name
+# (e.g., "deepsignal.xyz" from project "deep-signal"). Catch and require verification.
+# Known-safe domains are whitelisted; anything else gets flagged.
+URLS_IN_MSG=$(echo "$CONTENT" | grep -oE 'https?://[^ )"'"'"'>]+' 2>/dev/null || true)
+if [ -n "$URLS_IN_MSG" ]; then
+  UNFAMILIAR_URLS=""
+  while IFS= read -r url; do
+    [ -z "$url" ] && continue
+    # Skip well-known service domains
+    if echo "$url" | grep -qE '(github\.com|vercel\.app|vercel\.com|netlify\.app|netlify\.com|npmjs\.com|npmjs\.org|cloudflare\.com|google\.com|twitter\.com|x\.com|youtube\.com|reddit\.com|discord\.com|discord\.gg|telegram\.org|t\.me|localhost|127\.0\.0\.1|stackoverflow\.com|developer\.mozilla\.org|docs\.anthropic\.com|anthropic\.com|openai\.com|claude\.ai|notion\.so|linear\.app|fly\.io|render\.com|railway\.app|heroku\.com|amazonaws\.com|azure\.com|gitlab\.com|bitbucket\.org|docker\.com|hub\.docker\.com|pypi\.org|crates\.io|rubygems\.org|pkg\.go\.dev|wikipedia\.org|medium\.com|substack\.com|circle\.so|ghost\.io|telegraph\.ph)'; then
+      continue
+    fi
+    UNFAMILIAR_URLS="$UNFAMILIAR_URLS  $url\n"
+  done <<< "$URLS_IN_MSG"
+
+  if [ -n "$UNFAMILIAR_URLS" ]; then
+    ISSUES+=("URL_PROVENANCE: Your message contains URLs with unfamiliar domains:\n${UNFAMILIAR_URLS}Before including a URL in a message, verify it appeared in actual tool output in THIS session OR confirm it resolves with curl. A common confabulation pattern is constructing plausible-looking domains from project names (e.g., 'deepsignal.xyz' from project 'deep-signal'). If you did not get this URL from a tool, do NOT include it.")
+    ISSUE_COUNT=$((ISSUE_COUNT + 1))
+  fi
 fi
 
 # Output results
