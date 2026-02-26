@@ -1612,6 +1612,199 @@ If issues found, log them as learnings (POST /evolution/learnings) and fix what 
       },
       tags: ['coherence', 'default', 'maintenance'],
     },
+    {
+      slug: 'degradation-digest',
+      name: 'Degradation Digest',
+      description: 'Read DegradationReporter events, group repeated patterns, and escalate trends that need attention.',
+      schedule: '0 */4 * * *',
+      priority: 'medium',
+      expectedDurationMinutes: 1,
+      model: 'haiku',
+      enabled: true,
+      gate: `test -f .instar/state/degradation-events.json && python3 -c "import json; events=json.load(open('.instar/state/degradation-events.json')); exit(0 if len(events) > 0 else 1)" 2>/dev/null`,
+      execute: {
+        type: 'prompt',
+        value: `Review degradation events and surface patterns that need attention.
+
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+
+1. Read degradation events: cat .instar/state/degradation-events.json
+2. Group by feature — count how many times each feature degraded since the last digest
+3. Check if there's a previous digest: cat .instar/state/job-handoff-degradation-digest.md 2>/dev/null
+
+For each feature with repeated degradations (3+ events):
+- This is a PATTERN, not a one-off. It means the primary path is reliably failing.
+- Submit feedback: curl -s -X POST http://localhost:${port}/feedback -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' -d '{"type":"bug","title":"Repeated degradation: FEATURE","description":"FEATURE has degraded N times. Primary: X. Fallback: Y. Most recent reason: Z. This pattern indicates the primary path needs fixing."}'
+
+Write handoff notes with the current event count per feature:
+echo "Last digest: $(date -u +%Y-%m-%dT%H:%M:%SZ). Events by feature: ..." > .instar/state/job-handoff-degradation-digest.md
+
+If no patterns found (all one-offs), exit silently.`,
+      },
+      tags: ['coherence', 'default', 'guardian'],
+    },
+    {
+      slug: 'state-integrity-check',
+      name: 'State Integrity Check',
+      description: 'Cross-validate state file consistency, detect orphaned references and bloat.',
+      schedule: '0 */6 * * *',
+      priority: 'medium',
+      expectedDurationMinutes: 1,
+      model: 'haiku',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/health >/dev/null 2>&1`,
+      execute: {
+        type: 'prompt',
+        value: `Cross-validate agent state for logical consistency.
+
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+
+Check each integrity constraint:
+
+1. **Active job orphan**: If .instar/state/active-job.json exists, verify the session it references is actually running: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/sessions | check if the session name matches. If the session is dead but active-job.json persists, it's orphaned — delete it.
+
+2. **Job-topic orphan**: Read .instar/state/job-topic-mappings.json. For each mapping, verify the topic ID is reachable via: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/telegram/topics — if topics have been deleted, the mapping is stale.
+
+3. **State file bloat**: Check sizes: ls -la .instar/state/*.json | sort by size. Any file over 1MB is a bloat signal — report it. Common culprits: degradation-events.json growing unbounded, activity logs accumulating.
+
+4. **Config-reality match**: Read .instar/config.json. If telegram is configured, verify the bot is connected: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/health — check if telegram field shows connected. If config says telegram but health says disconnected, report the discrepancy.
+
+5. **Handoff note staleness**: Check .instar/state/job-handoff-*.md files. If any are older than 7 days and reference state that may have changed, flag them as potentially stale.
+
+For each issue found, submit feedback. Fix what you can (delete orphaned active-job.json, prune bloated files). Exit silently if everything checks out.`,
+      },
+      tags: ['coherence', 'default', 'guardian'],
+    },
+    {
+      slug: 'memory-hygiene',
+      name: 'Memory Hygiene',
+      description: 'Review MEMORY.md for stale entries, duplicates, and quality issues. Propose cleanup.',
+      schedule: '0 */12 * * *',
+      priority: 'low',
+      expectedDurationMinutes: 5,
+      model: 'opus',
+      enabled: true,
+      gate: `test -f .instar/MEMORY.md && wc -w < .instar/MEMORY.md | python3 -c "import sys; exit(0 if int(sys.stdin.read().strip()) > 100 else 1)" 2>/dev/null`,
+      execute: {
+        type: 'prompt',
+        value: `Review .instar/MEMORY.md for quality and hygiene.
+
+Read the full file: cat .instar/MEMORY.md
+
+Evaluate each entry against these criteria:
+
+1. **Staleness**: Does this entry reference files, APIs, URLs, or features that no longer exist? Verify by checking if referenced paths exist (ls, curl). Stale entries actively mislead future sessions.
+
+2. **Duplicates**: Are multiple entries saying the same thing in different words? Consolidate them.
+
+3. **Abstraction without substance**: Does the entry say something concrete and actionable, or is it a vague platitude? "Always verify before committing" without context of WHAT to verify is noise. Good: "The /api/chat endpoint caches responses for 5 minutes — bypass with ?nocache=1". Bad: "Remember to check caching behavior."
+
+4. **Size check**: Count total words. If MEMORY.md exceeds 5000 words, it's becoming a burden on context rather than an aid. Identify the bottom 20% by usefulness and propose removing them.
+
+5. **Organization**: Are entries grouped by topic? Is the structure navigable? Reorganize if needed.
+
+For issues found:
+- Fix duplicates and minor cleanups directly (edit the file)
+- For significant deletions, add a comment "PROPOSED REMOVAL: [reason]" rather than deleting — let the next reflection-trigger or human confirm
+- Log a learning if you discover a pattern: curl -s -X POST http://localhost:${port}/evolution/learnings -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' -d '{"category":"memory","insight":"...","confidence":"high"}'
+
+Write handoff: echo "Last hygiene: $(date). Words: N. Entries: N. Removed: N. Flagged: N." > .instar/state/job-handoff-memory-hygiene.md
+
+If MEMORY.md is clean and well-organized, exit silently.`,
+      },
+      grounding: {
+        requiresIdentity: true,
+        contextFiles: ['MEMORY.md'],
+      },
+      tags: ['coherence', 'default', 'guardian'],
+    },
+    {
+      slug: 'guardian-pulse',
+      name: 'Guardian Pulse',
+      description: 'Meta-monitor: verify other jobs are running, healthy, and not silently failing.',
+      schedule: '0 */8 * * *',
+      priority: 'high',
+      expectedDurationMinutes: 2,
+      model: 'haiku',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/health >/dev/null 2>&1`,
+      execute: {
+        type: 'prompt',
+        value: `Meta-monitor: check whether the guardians themselves are healthy.
+
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+
+1. **Job health**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs
+   For each enabled job, check:
+   - Has it run at all? (lastRun should exist)
+   - Is it overdue? (If lastRun is more than 3x the schedule interval ago, it's stuck)
+   - Is it failing repeatedly? (consecutiveFailures > 0 is notable, > 2 is critical)
+   - Is the lastError informative? (If it says "Session killed" repeatedly, something is wrong)
+
+2. **Skip ledger trends**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/skip-ledger/workloads
+   If any job has been skipped more than 10 times by its gate, the gate may be misconfigured (always returning skip), or the feature it monitors is permanently broken.
+
+3. **Queue health**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs — check queueLength.
+   If queue is perpetually > 0, jobs are backing up. This means maxParallelJobs is too low or jobs are running too long.
+
+4. **Degradation reporter health**: Read .instar/state/degradation-events.json — if events exist but none have reported:true or alerted:true, the downstream connections (FeedbackManager, Telegram) never initialized. The reporter is collecting but not communicating.
+
+5. **Session monitor**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/sessions
+   Are there zombie sessions (status: running but started > 30 minutes ago for a job that should take 5)?
+
+For each finding, categorize:
+- CRITICAL: Job has been failing for > 24 hours, or meta-infrastructure (scheduler, reporter) is broken
+- WARNING: Job overdue, skip count high, queue growing
+- INFO: Minor observations
+
+Report CRITICAL and WARNING issues. Exit silently if everything looks healthy.
+
+Write handoff: echo "Pulse at $(date). Jobs checked: N. Issues: [list or 'none']." > .instar/state/job-handoff-guardian-pulse.md`,
+      },
+      tags: ['coherence', 'default', 'guardian', 'meta'],
+    },
+    {
+      slug: 'session-continuity-check',
+      name: 'Session Continuity Check',
+      description: 'Verify that sessions produce lasting artifacts: handoff notes, memory updates, learnings.',
+      schedule: '0 */4 * * *',
+      priority: 'low',
+      expectedDurationMinutes: 2,
+      model: 'haiku',
+      enabled: true,
+      gate: `curl -sf http://localhost:${port}/health >/dev/null 2>&1`,
+      execute: {
+        type: 'prompt',
+        value: `Check whether recent sessions contributed to long-term knowledge.
+
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+
+1. **Recent sessions**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/sessions
+   Get sessions that completed in the last 8 hours.
+
+2. **For each completed job session**, check:
+   - Does a handoff note exist? (.instar/state/job-handoff-{slug}.md)
+   - Was it updated recently? (stat -f %m or date check)
+   - If the job is reflection-trigger or insight-harvest, did MEMORY.md actually change? (Check git diff or file modification time)
+
+3. **For interactive sessions** (non-job), check:
+   - Did the session produce any lasting artifacts? (git log for commits, MEMORY.md changes, new files in .instar/)
+   - If a long session (>10 minutes) left no trace, that's a continuity leak — knowledge was generated but not preserved.
+
+4. **Handoff note freshness**: ls -la .instar/state/job-handoff-*.md
+   - Any handoff note older than 7 days for an active job? It might contain stale claims.
+   - Flag stale handoff notes as potential misinformation vectors.
+
+Findings:
+- If sessions are running but not producing artifacts: propose an evolution to improve the reflection-trigger or add post-session hooks
+- If handoff notes are stale: add a "[STALE]" prefix to the file so the next job session treats it with appropriate skepticism
+
+Write handoff: echo "Continuity check at $(date). Sessions reviewed: N. Artifacts found: N. Gaps: N." > .instar/state/job-handoff-session-continuity-check.md
+
+Exit silently if continuity is healthy.`,
+      },
+      tags: ['coherence', 'default', 'guardian'],
+    },
   ];
 }
 
