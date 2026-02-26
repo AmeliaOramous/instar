@@ -152,6 +152,12 @@ export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 // Messaging
 export { TelegramAdapter } from './messaging/TelegramAdapter.js';
 export type { TelegramConfig } from './messaging/TelegramAdapter.js';
+export { NotificationBatcher } from './messaging/NotificationBatcher.js';
+export type { NotificationTier, BatchedNotification, BatcherConfig, BatcherStats } from './messaging/NotificationBatcher.js';
+
+// Knowledge
+export { KnowledgeManager } from './knowledge/KnowledgeManager.js';
+export type { KnowledgeSource, KnowledgeCatalog, IngestOptions, IngestResult } from './knowledge/KnowledgeManager.js';
 
 // Publishing
 export { TelegraphService, markdownToNodes, parseInline } from './publishing/TelegraphService.js';
