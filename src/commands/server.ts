@@ -1607,6 +1607,11 @@ export async function startServer(options: StartOptions): Promise<void> {
       onVerified: (commitment) => {
         console.log(`[CommitmentTracker] First verification passed: ${commitment.id} "${commitment.userRequest}"`);
       },
+      onEscalation: (commitment, detail) => {
+        notify('IMMEDIATE', 'commitment',
+          `BUG DETECTED — Commitment ${commitment.id} keeps drifting:\n${detail}`
+        );
+      },
     });
     commitmentTracker.start();
     console.log(pc.green('  Commitment tracker enabled'));

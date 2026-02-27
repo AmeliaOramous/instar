@@ -3673,6 +3673,7 @@ export function createRoutes(ctx: RouteContext): Router {
   });
 
   // ── Commitment Tracking ──────────────────────────────────────────
+  // Note: Specific routes (context, verify) MUST come before :id param routes.
 
   /**
    * Get all commitments with optional status filter.
@@ -3688,6 +3689,21 @@ export function createRoutes(ctx: RouteContext): Router {
     } else {
       res.json({ enabled: true, commitments: ctx.commitmentTracker.getAll() });
     }
+  });
+
+  /**
+   * Get behavioral context for session injection.
+   */
+  router.get('/commitments/context', (_req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.json({ enabled: false, context: '' });
+      return;
+    }
+    res.json({
+      enabled: true,
+      context: ctx.commitmentTracker.getBehavioralContext(),
+      health: ctx.commitmentTracker.getHealth(),
+    });
   });
 
   /**
@@ -3740,6 +3756,18 @@ export function createRoutes(ctx: RouteContext): Router {
   });
 
   /**
+   * Trigger verification of all active commitments.
+   */
+  router.post('/commitments/verify', (_req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const report = ctx.commitmentTracker.verify();
+    res.json(report);
+  });
+
+  /**
    * Withdraw a commitment.
    */
   router.post('/commitments/:id/withdraw', (req, res) => {
@@ -3758,33 +3786,6 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     res.json({ withdrawn: true, id: req.params.id });
-  });
-
-  /**
-   * Trigger verification of all active commitments.
-   */
-  router.post('/commitments/verify', (_req, res) => {
-    if (!ctx.commitmentTracker) {
-      res.status(404).json({ error: 'CommitmentTracker not configured' });
-      return;
-    }
-    const report = ctx.commitmentTracker.verify();
-    res.json(report);
-  });
-
-  /**
-   * Get behavioral context for session injection.
-   */
-  router.get('/commitments/context', (_req, res) => {
-    if (!ctx.commitmentTracker) {
-      res.json({ enabled: false, context: '' });
-      return;
-    }
-    res.json({
-      enabled: true,
-      context: ctx.commitmentTracker.getBehavioralContext(),
-      health: ctx.commitmentTracker.getHealth(),
-    });
   });
 
   return router;

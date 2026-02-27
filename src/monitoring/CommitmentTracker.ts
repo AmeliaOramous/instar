@@ -72,6 +72,17 @@ export interface Commitment {
   verificationMethod?: 'config-value' | 'file-exists' | 'manual';
   /** For one-time-action with file-exists: the path to check */
   verificationPath?: string;
+
+  // ── Self-healing tracking ─────────────────────────────
+
+  /** Number of times auto-correction has fired for this commitment */
+  correctionCount: number;
+  /** Timestamps of recent corrections (for pattern detection) */
+  correctionHistory: string[];
+  /** Whether this commitment has been escalated as a potential bug */
+  escalated: boolean;
+  /** Escalation details */
+  escalationDetail?: string;
 }
 
 export interface CommitmentStore {
@@ -103,6 +114,12 @@ export interface CommitmentTrackerConfig {
   onViolation?: (commitment: Commitment, detail: string) => void;
   /** Callback when a commitment is verified for the first time */
   onVerified?: (commitment: Commitment) => void;
+  /** Callback when repeated corrections suggest a bug. */
+  onEscalation?: (commitment: Commitment, detail: string) => void;
+  /** Number of corrections within the window that triggers escalation. Default: 3 */
+  escalationThreshold?: number;
+  /** Time window for counting corrections (ms). Default: 3_600_000 (1 hour) */
+  escalationWindowMs?: number;
 }
 
 // ── Implementation ────────────────────────────────────────────────
@@ -189,6 +206,9 @@ export class CommitmentTracker extends EventEmitter {
       expiresAt: input.expiresAt,
       verificationMethod: input.verificationMethod,
       verificationPath: input.verificationPath,
+      correctionCount: 0,
+      correctionHistory: [],
+      escalated: false,
     };
 
     this.store.commitments.push(commitment);
@@ -512,8 +532,17 @@ export class CommitmentTracker extends EventEmitter {
         commitment.status = 'verified';
         commitment.lastVerifiedAt = new Date().toISOString();
         commitment.verificationCount++;
+
+        // Track correction for escalation detection
+        const now = new Date().toISOString();
+        commitment.correctionCount = (commitment.correctionCount ?? 0) + 1;
+        commitment.correctionHistory = [...(commitment.correctionHistory ?? []), now];
+
+        // Check for escalation: too many corrections in a time window suggests a bug
+        this.checkForEscalation(commitment);
+
         this.saveStore();
-        console.log(`[CommitmentTracker] Auto-corrected ${commitment.id}: ${commitment.configPath} → ${JSON.stringify(commitment.configExpectedValue)}`);
+        console.log(`[CommitmentTracker] Auto-corrected ${commitment.id}: ${commitment.configPath} → ${JSON.stringify(commitment.configExpectedValue)} (correction #${commitment.correctionCount})`);
         this.emit('corrected', commitment);
         return true;
       }
@@ -522,6 +551,36 @@ export class CommitmentTracker extends EventEmitter {
     }
 
     return false;
+  }
+
+  /**
+   * Check if a commitment has been auto-corrected too many times,
+   * suggesting a bug rather than simple drift.
+   */
+  private checkForEscalation(commitment: Commitment): void {
+    if (commitment.escalated) return; // Already escalated
+
+    const threshold = this.config.escalationThreshold ?? 3;
+    const windowMs = this.config.escalationWindowMs ?? 3_600_000; // 1 hour
+    const now = Date.now();
+
+    // Count corrections within the window
+    const recentCorrections = (commitment.correctionHistory ?? []).filter(ts => {
+      return (now - new Date(ts).getTime()) < windowMs;
+    });
+
+    if (recentCorrections.length >= threshold) {
+      commitment.escalated = true;
+      const detail = `Commitment ${commitment.id} ("${commitment.userRequest}") has been auto-corrected ${recentCorrections.length} times in the last ${Math.round(windowMs / 60_000)} minutes. Config path: ${commitment.configPath}. This pattern suggests something is actively overwriting the value — likely a bug in initialization, a conflicting process, or a default value that resets on restart.`;
+      commitment.escalationDetail = detail;
+
+      console.warn(`[CommitmentTracker] ESCALATION ${commitment.id}: ${detail}`);
+      this.emit('escalation', commitment, detail);
+
+      if (this.config.onEscalation) {
+        this.config.onEscalation(commitment, detail);
+      }
+    }
   }
 
   // ── Behavioral Rules File ──────────────────────────────────────
@@ -579,6 +638,12 @@ export class CommitmentTracker extends EventEmitter {
       if (fs.existsSync(this.storePath)) {
         const data = JSON.parse(fs.readFileSync(this.storePath, 'utf-8'));
         if (data.version === 1 && Array.isArray(data.commitments)) {
+          // Migrate: add self-healing fields to existing commitments
+          for (const c of data.commitments) {
+            if (c.correctionCount === undefined) c.correctionCount = 0;
+            if (c.correctionHistory === undefined) c.correctionHistory = [];
+            if (c.escalated === undefined) c.escalated = false;
+          }
           return data as CommitmentStore;
         }
       }
