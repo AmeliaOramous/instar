@@ -43,6 +43,7 @@ export interface BatcherStats {
   summaryQueueSize: number;
   digestQueueSize: number;
   totalFlushed: number;
+  totalSuppressed: number;
   lastSummaryFlush: Date | null;
   lastDigestFlush: Date | null;
 }
@@ -72,6 +73,14 @@ export class NotificationBatcher {
   private lastSummaryFlush: Date | null = null;
   private lastDigestFlush: Date | null = null;
   private totalFlushed = 0;
+  private suppressedCount = 0;
+  /**
+   * Cross-batch suppression: tracks what was sent per dedup key.
+   * If the same dedup key arrives with identical content, it's suppressed.
+   * Only fires again when content CHANGES — "state-change-only" behavior.
+   * Key format: `${topicId}:${dedupKey}` → message content
+   */
+  private lastSentContent: Map<string, string> = new Map();
 
   constructor(config?: Partial<BatcherConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -114,7 +123,17 @@ export class NotificationBatcher {
     const dedupKey = this.generateDedupKey(notification.category, notification.message);
     const queue = effectiveTier === 'SUMMARY' ? this.summaryQueue : this.digestQueue;
 
-    // Dedup: if an identical notification shape already exists in this batch window, collapse it
+    // Cross-batch suppression: if this dedup key was sent in a previous batch
+    // with identical content, suppress it. Only re-notify when content CHANGES.
+    // This prevents "everything healthy" from appearing in every batch.
+    const crossBatchKey = `${notification.topicId}:${dedupKey}`;
+    const lastContent = this.lastSentContent.get(crossBatchKey);
+    if (lastContent !== undefined && lastContent === dedupKey) {
+      this.suppressedCount++;
+      return;
+    }
+
+    // Within-batch dedup: collapse identical shapes into one entry with count
     const existing = queue.find(q => q.dedupKey === dedupKey && q.topicId === notification.topicId);
     if (existing) {
       existing.count++;
@@ -157,6 +176,11 @@ export class NotificationBatcher {
     for (const [topicId, topicItems] of byTopic) {
       const digestMessage = this.formatDigest(tierLabel, topicItems);
       await this.sendDirect(topicId, digestMessage);
+
+      // Record sent content for cross-batch suppression
+      for (const item of topicItems) {
+        this.lastSentContent.set(`${topicId}:${item.dedupKey}`, item.dedupKey);
+      }
     }
 
     const count = items.length;
@@ -183,9 +207,26 @@ export class NotificationBatcher {
       summaryQueueSize: this.summaryQueue.length,
       digestQueueSize: this.digestQueue.length,
       totalFlushed: this.totalFlushed,
+      totalSuppressed: this.suppressedCount,
       lastSummaryFlush: this.lastSummaryFlush,
       lastDigestFlush: this.lastDigestFlush,
     };
+  }
+
+  /**
+   * Clear the cross-batch suppression memory for a specific key or all keys.
+   * Use when you know state has changed and want to force re-notification.
+   */
+  clearSuppression(dedupKey?: string): void {
+    if (dedupKey) {
+      for (const key of this.lastSentContent.keys()) {
+        if (key.endsWith(`:${dedupKey}`)) {
+          this.lastSentContent.delete(key);
+        }
+      }
+    } else {
+      this.lastSentContent.clear();
+    }
   }
 
   isEnabled(): boolean {

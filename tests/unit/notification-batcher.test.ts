@@ -529,6 +529,83 @@ describe('NotificationBatcher', () => {
     });
   });
 
+  describe('cross-batch suppression', () => {
+    it('suppresses identical notifications across batch boundaries', async () => {
+      const { batcher, sendFn } = createBatcher();
+
+      // Batch 1: enqueue and flush
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'System healthy' }));
+      await batcher.flush('SUMMARY');
+      expect(sendFn.calls).toHaveLength(1);
+
+      // Batch 2: same message — should be suppressed
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'System healthy' }));
+      expect(batcher.getQueueSize().summary).toBe(0); // Never entered queue
+    });
+
+    it('allows changed content through after suppression', async () => {
+      const { batcher, sendFn } = createBatcher();
+
+      // Batch 1: healthy
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Coherence: all checks passed' }));
+      await batcher.flush('SUMMARY');
+
+      // Batch 2: degraded — different content, should pass through
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Coherence: shadow installation detected' }));
+      expect(batcher.getQueueSize().summary).toBe(1); // Entered queue
+    });
+
+    it('tracks suppressed count in stats', async () => {
+      const { batcher } = createBatcher();
+
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Recurring alert' }));
+      await batcher.flush('SUMMARY');
+
+      // These should be suppressed
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Recurring alert' }));
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Recurring alert' }));
+
+      expect(batcher.getStats().totalSuppressed).toBe(2);
+    });
+
+    it('clearSuppression allows re-notification', async () => {
+      const { batcher } = createBatcher();
+
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Alert one' }));
+      await batcher.flush('SUMMARY');
+
+      // Suppressed
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Alert one' }));
+      expect(batcher.getQueueSize().summary).toBe(0);
+
+      // Clear and retry
+      batcher.clearSuppression();
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Alert one' }));
+      expect(batcher.getQueueSize().summary).toBe(1);
+    });
+
+    it('suppression is scoped per topicId', async () => {
+      const { batcher } = createBatcher();
+
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Same msg', topicId: 100 }));
+      await batcher.flush('SUMMARY');
+
+      // Same message, different topic — should NOT be suppressed
+      await batcher.enqueue(makeNotification({ tier: 'SUMMARY', message: 'Same msg', topicId: 200 }));
+      expect(batcher.getQueueSize().summary).toBe(1);
+    });
+
+    it('does NOT suppress IMMEDIATE tier', async () => {
+      const { batcher, sendFn } = createBatcher();
+
+      // Send IMMEDIATE twice — both should go through
+      await batcher.enqueue(makeNotification({ tier: 'IMMEDIATE', message: 'Critical!' }));
+      await batcher.enqueue(makeNotification({ tier: 'IMMEDIATE', message: 'Critical!' }));
+
+      expect(sendFn.calls).toHaveLength(2);
+    });
+  });
+
   describe('edge cases', () => {
     it('handles mixed tiers correctly', async () => {
       const { batcher, sendFn } = createBatcher();
