@@ -1,12 +1,13 @@
 # PROP: Mature Memory Architecture for Instar
 
-> **Version**: 3.0
+> **Version**: 3.1
 > **Date**: 2026-02-28
-> **Status**: Phase 1-2 complete (115 tests). v3.0 — cross-review fixes + hybrid vector search.
+> **Status**: Phase 1-2 complete (115 tests). v3.1 — all cross-review P0s resolved. Ready to build.
 > **Author**: Dawn (Inside-Dawn, builder instance)
 > **Instar Version**: 0.9.17 (baseline)
 > **Target Version**: 0.10.x
-> **Cross-Review**: 8.5/10 avg (GPT 5.2, Gemini 3 Pro, Grok 4) — all findings addressed in this revision.
+> **Cross-Review v2.0**: 8.5/10 avg — P0 fixes applied in v3.0
+> **Cross-Review v3.0**: 8.9/10 avg — P0 fixes applied in v3.1 (tombstones, dedup, expiry filtering)
 
 ---
 
@@ -110,16 +111,22 @@ interface MemoryEntity {
   decayHalfLife: number;         // Days until confidence halves (default 30; per-entity override)
   version: number;               // Incremented on every update (optimistic concurrency)
   accessCount: number;           // Incremented on recall/search inclusion
+  verificationState: 'unverified' | 'verified';  // See Confidence Decay for semantics
 
   // Temporal
   createdAt: string;             // When first recorded
-  lastVerified: string;          // When last confirmed true (ONLY updated by verify())
+  lastVerified: string;          // Set to createdAt on insert; ONLY updated by verify()
   lastAccessed: string;          // When last retrieved for a session
   expiresAt?: string;            // Optional hard expiry (e.g., "API key rotates monthly")
+
+  // Tombstone (soft-delete support)
+  deletedAt?: string;            // NULL = active; timestamp = soft-deleted
+  deleteReason?: string;         // Why this entity was forgotten
 
   // Provenance
   source: string;                // Where this came from ('session:ABC', 'observation', 'user:Justin')
   sourceSession?: string;        // Session ID that created this
+  sourceOfTruth?: string;        // Origin system: 'semantic' | 'relationships' | 'canonical_state'
 
   // Classification
   tags: string[];                // Free-form tags for filtering
@@ -200,12 +207,16 @@ CREATE TABLE entities (
   decay_half_life INTEGER NOT NULL DEFAULT 30,   -- Days; overridable per entity
   version INTEGER NOT NULL DEFAULT 1,            -- Incremented on every update
   access_count INTEGER NOT NULL DEFAULT 0,       -- Incremented on recall/search inclusion
+  verification_state TEXT NOT NULL DEFAULT 'unverified',  -- 'unverified' | 'verified'
   created_at TEXT NOT NULL,
-  last_verified TEXT NOT NULL,
+  last_verified TEXT NOT NULL,                   -- Set to created_at on insert; only updated by verify()
   last_accessed TEXT NOT NULL,
   expires_at TEXT,
+  deleted_at TEXT,                               -- Tombstone: NULL = active, timestamp = soft-deleted
+  delete_reason TEXT,                            -- Why this entity was forgotten
   source TEXT NOT NULL,
   source_session TEXT,
+  source_of_truth TEXT,                          -- Origin system: 'semantic' | 'relationships' | 'canonical_state'
   domain TEXT,
   tags TEXT NOT NULL DEFAULT '[]'  -- JSON array
 );
@@ -267,6 +278,8 @@ CREATE INDEX idx_entities_type ON entities(type);
 CREATE INDEX idx_entities_domain ON entities(domain);
 CREATE INDEX idx_entities_confidence ON entities(confidence);
 CREATE INDEX idx_entities_sensitivity ON entities(sensitivity);
+CREATE INDEX idx_entities_deleted ON entities(deleted_at);     -- Fast tombstone filtering
+CREATE INDEX idx_entities_expires ON entities(expires_at);     -- Fast expiry filtering
 CREATE INDEX idx_edges_from ON edges(from_id);
 CREATE INDEX idx_edges_to ON edges(to_id);
 CREATE INDEX idx_edges_relation ON edges(relation);
@@ -297,17 +310,30 @@ class SemanticMemory {
   /**
    * Record a new fact, lesson, pattern, etc.
    *
-   * DEDUPLICATION: Before inserting, searches for existing entities with
-   * matching name (case-insensitive exact match or Levenshtein distance ≤ 2).
-   * If a match is found:
-   *   - Same type: merge (update content, refresh confidence, bump version)
-   *   - Different type: link via 'related_to' edge, create new entity
-   * Returns existing entity ID on merge, new entity ID on create.
+   * DEDUPLICATION (two-stage — cross-review v3.0 P0 fix):
+   * Stage 1 — Lexical: Search for existing entities with matching name
+   *   (case-insensitive exact match) AND same entity type.
+   *   If found: merge (update content, refresh confidence, bump version).
+   * Stage 2 — Semantic (when Phase 5 embeddings available): If no lexical
+   *   match, compute embedding similarity against top candidates.
+   *   If cosine similarity > 0.9: trigger LLM "same or different?" check.
+   *   If LLM confirms same: merge. If different: create new entity.
+   *   (Falls back to Stage 1 only when embeddings unavailable.)
+   *
+   * Type-aware: "React" (type: tool) vs "react" (type: pattern) are
+   * different entities even with identical names. Same name + same type
+   * triggers the dedup check; different types never auto-merge.
+   *
+   * All merge decisions are logged to entity_audit for review.
    *
    * REDACTION: Content is passed through the Sanitizer before storage.
    * Patterns matching secrets (API keys, tokens, passwords) are stripped.
+   *
+   * TRANSACTION: The full operation (entity insert/update + edges + audit
+   * + FTS trigger + embedding upsert) runs in a single transaction.
+   * Rollback on any failure.
    */
-  remember(entity: Omit<MemoryEntity, 'id' | 'createdAt' | 'lastAccessed' | 'version' | 'accessCount'>): string;
+  remember(entity: Omit<MemoryEntity, 'id' | 'createdAt' | 'lastAccessed' | 'version' | 'accessCount' | 'verificationState' | 'deletedAt' | 'deleteReason'>): string;
 
   /** Connect two entities */
   connect(fromId: string, toId: string, relation: RelationType, context?: string): string;
@@ -332,8 +358,10 @@ class SemanticMemory {
    * 6. Filter by type/domain/confidence
    * 7. Increment access_count for returned entities
    *
-   * Entities with sensitivity='sensitive' are excluded from results
-   * unless options.includeSensitive is true.
+   * MANDATORY FILTERS (always applied unless explicitly overridden):
+   * - Exclude tombstoned entities (deleted_at IS NOT NULL)
+   * - Exclude expired entities (expires_at IS NOT NULL AND expires_at < now())
+   * - Exclude sensitive entities (sensitivity = 'sensitive')
    */
   search(query: string, options?: {
     types?: EntityType[];
@@ -342,26 +370,39 @@ class SemanticMemory {
     limit?: number;
     expandQuery?: boolean;        // LLM synonym expansion (default: false)
     includeSensitive?: boolean;   // Include sensitive entities (default: false)
+    includeExpired?: boolean;     // Include expired entities (default: false, for debugging)
+    includeDeleted?: boolean;     // Include tombstoned entities (default: false)
   }): ScoredEntity[];
 
   /**
    * Get an entity and its connections (1-hop neighborhood).
    * Returns BOTH inbound and outbound edges by default.
    * Increments access_count for the primary entity.
+   *
+   * MANDATORY FILTERS: Excludes tombstoned and expired connected entities
+   * (same rules as search). The primary entity is returned even if
+   * tombstoned/expired (the caller explicitly asked for it by ID).
    */
   recall(id: string, options?: {
     direction?: 'both' | 'outbound' | 'inbound';  // Default: 'both'
+    includeExpired?: boolean;
+    includeDeleted?: boolean;
   }): { entity: MemoryEntity; connections: ConnectedEntity[] };
 
   /**
    * Find entities related to a topic (graph traversal).
    * Traverses BOTH directions by default, respects edge weights.
+   *
+   * MANDATORY FILTERS: Tombstoned and expired entities are excluded
+   * from traversal results (they are dead-ends in the graph).
    */
   explore(startId: string, options?: {
     maxDepth?: number;    // Default: 2
     relations?: RelationType[];
     minWeight?: number;
     direction?: 'both' | 'outbound' | 'inbound';
+    includeExpired?: boolean;
+    includeDeleted?: boolean;
   }): MemoryEntity[];
 
   /** Get context for a session — the "working memory loader" */
@@ -388,9 +429,15 @@ class SemanticMemory {
 
   /**
    * Remove an entity and its edges.
-   * Uses soft-delete (tombstone) for 'person' and 'decision' entities.
-   * Hard-deletes 'fact' and 'tool' entities.
-   * Always logs to entity_audit table.
+   *
+   * TOMBSTONE BEHAVIOR (by entity type):
+   * - 'person', 'decision', 'lesson': Soft-delete (sets deleted_at + delete_reason).
+   *   Entity row preserved; edges preserved but hidden from default traversal.
+   *   Recoverable via future undelete or audit trail inspection.
+   * - 'fact', 'tool', 'pattern', 'project': Hard-delete (row removed).
+   *   Edges cascade-deleted. Audit log entry preserved.
+   *
+   * Always logs to entity_audit table regardless of soft/hard delete.
    */
   forget(id: string, reason: string): void;
 
@@ -455,11 +502,14 @@ This means:
 effective_confidence = confidence * exp(-0.693 * days_since_verified / entity.decayHalfLife)
 ```
 
-**Key invariants** (cross-review: GPT identified double-decay risk):
+**Key invariants** (cross-review v2.0: GPT identified double-decay risk; v3.0: GPT identified initialization ambiguity):
 1. `confidence` stores the BASE confidence set at creation or last `verify()` call
-2. `lastVerified` is ONLY updated by `verify()` — never by decay, search, or any other operation
-3. Effective confidence is computed at query time using the formula above
-4. `decayAll()` does NOT modify `confidence` — it only identifies entities that have decayed below a threshold for cleanup/notification
+2. `lastVerified` is set to `createdAt` on insert — new entities start as `verificationState: 'unverified'`
+3. `lastVerified` is ONLY updated by `verify()` — never by decay, search, or any other operation
+4. Effective confidence is computed at query time using the formula above
+5. `decayAll()` does NOT modify `confidence` — it only identifies entities that have decayed below a threshold for cleanup/notification
+6. **Unverified penalty**: Entities with `verificationState: 'unverified'` receive a 0.8x multiplier on effective confidence, ensuring that a fresh unverified fact doesn't appear as trustworthy as a verified one even within the first half-life window
+7. **Trusted sources**: Entities from trusted sources (CanonicalState, user:Justin) are created with `verificationState: 'verified'` and higher base confidence (0.95)
 
 **Per-entity half-life** (cross-review: Grok recommendation):
 Each entity has its own `decayHalfLife` (in days), defaulting by entity type (see table above). A `fact` with decayHalfLife=30 not re-verified in 30 days has effective confidence at 50%. In 60 days, 25%. In 90 days, 12.5%.
