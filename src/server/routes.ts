@@ -4296,27 +4296,7 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  router.post('/messages/relay-machine', async (req, res) => {
-    if (!ctx.messageRouter) {
-      res.status(503).json({ error: 'Messaging not available' });
-      return;
-    }
-    try {
-      const envelope = req.body;
-      if (!envelope?.message?.id) {
-        res.status(400).json({ error: 'Invalid envelope' });
-        return;
-      }
-      const accepted = await ctx.messageRouter.relay(envelope, 'machine');
-      if (accepted) {
-        res.json({ ok: true });
-      } else {
-        res.status(409).json({ error: 'Relay rejected (loop or duplicate)' });
-      }
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : 'Relay failed' });
-    }
-  });
+  // relay-machine endpoint is now in machineRoutes.ts (protected by Machine-HMAC auth)
 
   router.get('/messages/stats', async (req, res) => {
     if (!ctx.messageRouter) {

@@ -180,6 +180,7 @@ export class AgentServer {
           ready: true,
           state: { jobs: [], sessions: [] },
         }),
+        messageRouter: options.messageRouter ?? null,
       });
       this.app.use(machineRoutes);
     }

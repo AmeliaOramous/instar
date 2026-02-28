@@ -86,6 +86,21 @@ export class MessageStore implements IMessageStore {
     fs.renameSync(tmpPath, filePath);
   }
 
+  /**
+   * Overwrite a stored envelope entirely.
+   * Used after cross-machine routing updates transport fields (signature, relayChain).
+   */
+  async updateEnvelope(envelope: MessageEnvelope): Promise<void> {
+    const filePath = this.messageFilePath(envelope.message.id);
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Message not found: ${envelope.message.id}`);
+    }
+
+    const tmpPath = filePath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(envelope, null, 2));
+    fs.renameSync(tmpPath, filePath);
+  }
+
   async queryInbox(agentName: string, filter?: MessageFilter): Promise<MessageEnvelope[]> {
     const envelopes = this.readAllEnvelopes();
 

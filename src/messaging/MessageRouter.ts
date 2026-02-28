@@ -11,6 +11,8 @@
  * - Deduplication on relay receipt
  * - Delivery state monotonic transitions
  * - Drop-directory fallback for offline agents
+ * - Cross-machine relay with Ed25519 signatures and Machine-HMAC auth
+ * - Outbound queue for offline cross-machine fallback
  *
  * Routing decision tree (from INTER-AGENT-MESSAGING-SPEC v3.1):
  *   target machine == local?
@@ -18,7 +20,9 @@
  *       → Yes: deliver locally (no relay needed)
  *       → No: relay via POST /api/messages/relay-agent (Bearer token)
  *              If agent down → write to drop directory with HMAC
- *     → No: cross-machine relay (Phase 4 — future)
+ *     → No: target machine paired and online?
+ *       → Yes: relay via POST /api/messages/relay-machine (Machine-HMAC + Ed25519)
+ *       → No: queue to outbound directory for git-sync fallback
  */
 
 import crypto from 'node:crypto';
@@ -35,13 +39,19 @@ import type {
   SendResult,
   DeliveryState,
   MessagingStats,
+  SignedPayload,
 } from './types.js';
-import { DEFAULT_TTL, VALID_TRANSITIONS } from './types.js';
+import { DEFAULT_TTL, VALID_TRANSITIONS, CLOCK_SKEW_TOLERANCE } from './types.js';
 import type { MessageStore } from './MessageStore.js';
 import type { MessageDelivery } from './MessageDelivery.js';
 import { getAgentToken, computeDropHmac } from './AgentTokenManager.js';
 import { listAgents } from '../core/AgentRegistry.js';
 import type { AgentRegistryEntry } from '../core/types.js';
+import type { MachineIdentityManager } from '../core/MachineIdentity.js';
+import { sign, verify } from '../core/MachineIdentity.js';
+import { signRequest } from '../server/machineAuth.js';
+import type { NonceStore } from '../core/NonceStore.js';
+import type { SecurityLog } from '../core/SecurityLog.js';
 
 export interface MessageRouterConfig {
   localAgent: string;
@@ -49,15 +59,32 @@ export interface MessageRouterConfig {
   serverUrl: string;
 }
 
+/** Optional cross-machine crypto dependencies. Only needed when multi-machine is enabled. */
+export interface CrossMachineDeps {
+  identityManager: MachineIdentityManager;
+  signingKeyPem: string;
+  nonceStore: NonceStore;
+  securityLog: SecurityLog;
+}
+
 export class MessageRouter implements IMessageRouter {
   private readonly store: MessageStore;
   private readonly delivery: MessageDelivery;
   private readonly config: MessageRouterConfig;
+  private readonly crossMachine: CrossMachineDeps | null;
+  /** Monotonic sequence counter for Machine-HMAC outgoing requests */
+  private machineSequence: number = 0;
 
-  constructor(store: MessageStore, delivery: MessageDelivery, config: MessageRouterConfig) {
+  constructor(
+    store: MessageStore,
+    delivery: MessageDelivery,
+    config: MessageRouterConfig,
+    crossMachine?: CrossMachineDeps,
+  ) {
     this.store = store;
     this.delivery = delivery;
     this.config = config;
+    this.crossMachine = crossMachine ?? null;
   }
 
   async send(
@@ -130,10 +157,12 @@ export class MessageRouter implements IMessageRouter {
     if (isLocalMachine && !isLocalAgent) {
       // Cross-agent, same machine → relay via HTTP or drop directory
       await this.routeCrossAgentLocal(envelope);
+    } else if (!isLocalMachine) {
+      // Cross-machine → relay via HTTP with Ed25519 or queue to outbound
+      await this.routeCrossMachine(envelope);
     }
     // If isLocalMachine && isLocalAgent → already saved locally, delivery is handled
     // by the local agent's session delivery mechanism
-    // If !isLocalMachine → cross-machine (Task 3 — queued for future implementation)
 
     return {
       messageId,
@@ -173,6 +202,23 @@ export class MessageRouter implements IMessageRouter {
     // Deduplication: if message already exists, return ACK but don't re-store
     if (await this.store.exists(envelope.message.id)) {
       return true;
+    }
+
+    // Cross-machine relay requires Ed25519 signature verification
+    if (source === 'machine') {
+      if (!this.crossMachine) {
+        return false; // Cross-machine not enabled
+      }
+      const verifyResult = this.verifyEnvelopeSignature(envelope);
+      if (!verifyResult.valid) {
+        this.crossMachine.securityLog.append({
+          event: 'relay_signature_invalid',
+          reason: verifyResult.reason,
+          messageId: envelope.message.id,
+          signedBy: envelope.transport.signedBy ?? 'unknown',
+        });
+        return false;
+      }
     }
 
     // Update delivery phase to 'received'
@@ -318,9 +364,279 @@ export class MessageRouter implements IMessageRouter {
     await this.store.updateDelivery(envelope.message.id, envelope.delivery);
   }
 
+  // ── Routing: Cross-Machine ─────────────────────────────────────
+
+  /**
+   * Route a message to a different machine.
+   *
+   * Flow (per spec §Cross-Machine):
+   * 1. Verify cross-machine deps are available
+   * 2. Verify target machine is paired and active
+   * 3. Resolve target machine URL
+   * 4. Add self to relay chain (before signing — relayChain is part of SignedPayload)
+   * 5. Sign envelope with Ed25519
+   * 6. Forward via POST relay-machine with Machine-HMAC headers
+   * 7. If relay fails → queue to outbound directory for git-sync fallback
+   */
+  private async routeCrossMachine(envelope: MessageEnvelope): Promise<void> {
+    const targetMachine = envelope.message.to.machine;
+
+    if (!this.crossMachine) {
+      // Cross-machine not enabled — queue for later
+      await this.queueOutbound(envelope, targetMachine, 'cross-machine not enabled');
+      return;
+    }
+
+    const { identityManager } = this.crossMachine;
+
+    // Verify target machine is paired and active
+    if (!identityManager.isMachineActive(targetMachine)) {
+      const now = new Date().toISOString();
+      envelope.delivery = {
+        ...envelope.delivery,
+        phase: 'failed',
+        transitions: [
+          ...envelope.delivery.transitions,
+          { from: envelope.delivery.phase, to: 'failed', at: now, reason: `target machine ${targetMachine} not active or unknown` },
+        ],
+        failureReason: `target machine ${targetMachine} not active or unknown`,
+      };
+      await this.store.updateDelivery(envelope.message.id, envelope.delivery);
+      return;
+    }
+
+    // Resolve target machine URL
+    const targetUrl = identityManager.getMachineUrl(targetMachine);
+    if (!targetUrl) {
+      // No URL known — queue for git-sync
+      await this.queueOutbound(envelope, targetMachine, 'no URL known for target machine');
+      return;
+    }
+
+    // Add self to relay chain before signing (relayChain is part of SignedPayload)
+    envelope.transport.relayChain.push(this.config.localMachine);
+
+    // Sign envelope with Ed25519
+    this.signEnvelope(envelope);
+
+    // Try HTTP relay
+    const relaySuccess = await this.relayToMachine(envelope, targetUrl);
+    if (relaySuccess) {
+      const now = new Date().toISOString();
+      envelope.delivery = {
+        ...envelope.delivery,
+        phase: 'received',
+        transitions: [
+          ...envelope.delivery.transitions,
+          { from: 'sent', to: 'received', at: now, reason: `relayed to machine ${targetMachine}` },
+        ],
+        attempts: envelope.delivery.attempts + 1,
+      };
+      // Persist the full envelope (transport was updated with signature + relayChain)
+      await this.store.updateEnvelope(envelope);
+      return;
+    }
+
+    // HTTP relay failed — queue to outbound for git-sync
+    await this.queueOutbound(envelope, targetMachine, 'relay failed (machine unreachable)');
+  }
+
+  /**
+   * Sign a message envelope with this machine's Ed25519 key.
+   * Sets transport.signature and transport.signedBy.
+   *
+   * Signature covers the canonical JSON of the SignedPayload:
+   * { message, relayChain, originServer, nonce, timestamp }
+   */
+  private signEnvelope(envelope: MessageEnvelope): void {
+    if (!this.crossMachine) return;
+
+    const signedPayload: SignedPayload = {
+      message: envelope.message,
+      relayChain: envelope.transport.relayChain,
+      originServer: envelope.transport.originServer,
+      nonce: envelope.transport.nonce,
+      timestamp: envelope.transport.timestamp,
+    };
+
+    const canonical = canonicalJSON(signedPayload);
+    envelope.transport.signature = sign(canonical, this.crossMachine.signingKeyPem);
+    envelope.transport.signedBy = this.config.localMachine;
+  }
+
+  /**
+   * Verify the Ed25519 signature on an incoming cross-machine envelope.
+   * Checks: signature present, signer is active, clock skew within tolerance, signature valid.
+   */
+  private verifyEnvelopeSignature(envelope: MessageEnvelope): { valid: true } | { valid: false; reason: string } {
+    if (!this.crossMachine) {
+      return { valid: false, reason: 'cross-machine not enabled' };
+    }
+
+    const { identityManager } = this.crossMachine;
+
+    // Signature must be present
+    if (!envelope.transport.signature || !envelope.transport.signedBy) {
+      return { valid: false, reason: 'missing signature or signedBy' };
+    }
+
+    // Signer must be a known, active machine
+    if (!identityManager.isMachineActive(envelope.transport.signedBy)) {
+      return { valid: false, reason: `signer ${envelope.transport.signedBy} not active or unknown` };
+    }
+
+    // Clock skew check for real-time relay
+    const tolerance = CLOCK_SKEW_TOLERANCE['relay-machine'];
+    if (tolerance != null) {
+      const envelopeTime = new Date(envelope.transport.timestamp).getTime();
+      const skew = Math.abs(Date.now() - envelopeTime);
+      if (skew > tolerance) {
+        return { valid: false, reason: `timestamp skew ${Math.round(skew / 1000)}s exceeds ${tolerance / 1000}s tolerance` };
+      }
+    }
+
+    // Get signer's public key
+    const publicKeyPem = identityManager.getSigningPublicKeyPem(envelope.transport.signedBy);
+    if (!publicKeyPem) {
+      return { valid: false, reason: `public key not found for ${envelope.transport.signedBy}` };
+    }
+
+    // Reconstruct and verify the SignedPayload
+    const signedPayload: SignedPayload = {
+      message: envelope.message,
+      relayChain: envelope.transport.relayChain,
+      originServer: envelope.transport.originServer,
+      nonce: envelope.transport.nonce,
+      timestamp: envelope.transport.timestamp,
+    };
+
+    const canonical = canonicalJSON(signedPayload);
+    try {
+      const isValid = verify(canonical, envelope.transport.signature, publicKeyPem);
+      if (!isValid) {
+        return { valid: false, reason: 'signature verification failed' };
+      }
+    } catch (err) {
+      return { valid: false, reason: `signature error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Relay an envelope to a remote machine via HTTP.
+   * Uses Machine-HMAC (5-header scheme) for transport auth.
+   * The envelope itself carries Ed25519 signature for message integrity.
+   */
+  private async relayToMachine(envelope: MessageEnvelope, targetUrl: string): Promise<boolean> {
+    if (!this.crossMachine) return false;
+
+    try {
+      const sequence = this.machineSequence++;
+      const machineHeaders = signRequest(
+        this.config.localMachine,
+        this.crossMachine.signingKeyPem,
+        envelope,
+        sequence,
+      );
+
+      const url = `${targetUrl}/messages/relay-machine`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...machineHeaders,
+        },
+        body: JSON.stringify(envelope),
+        signal: AbortSignal.timeout(10_000), // Cross-machine gets longer timeout
+      });
+
+      return response.ok;
+    } catch {
+      // @silent-fallback-ok — network failure, will fall back to outbound queue
+      return false;
+    }
+  }
+
+  /**
+   * Queue a message in the outbound directory for offline cross-machine delivery.
+   * These are picked up by git-sync or on next machine connection.
+   *
+   * Outbound path: ~/.instar/messages/outbound/{targetMachineId}/{messageId}.json
+   */
+  private async queueOutbound(
+    envelope: MessageEnvelope,
+    targetMachine: string,
+    reason: string,
+  ): Promise<void> {
+    const outboundDir = path.join(os.homedir(), '.instar', 'messages', 'outbound', targetMachine);
+    fs.mkdirSync(outboundDir, { recursive: true });
+
+    // Sign envelope if not already signed (outbound messages need signatures for git-sync verification)
+    if (!envelope.transport.signature && this.crossMachine) {
+      envelope.transport.relayChain.push(this.config.localMachine);
+      this.signEnvelope(envelope);
+    }
+
+    // Update delivery phase to 'queued'
+    const now = new Date().toISOString();
+    envelope.delivery = {
+      ...envelope.delivery,
+      phase: 'queued',
+      transitions: [
+        ...envelope.delivery.transitions,
+        { from: envelope.delivery.phase, to: 'queued', at: now, reason: `outbound: ${reason}` },
+      ],
+      attempts: envelope.delivery.attempts + 1,
+    };
+
+    // Write envelope to outbound directory
+    const outboundPath = path.join(outboundDir, `${envelope.message.id}.json`);
+    fs.writeFileSync(outboundPath, JSON.stringify(envelope, null, 2), { encoding: 'utf-8' });
+
+    // Update local store
+    await this.store.updateDelivery(envelope.message.id, envelope.delivery);
+  }
+
   // ── Private Helpers ──────────────────────────────────────────────
 
   private isValidTransition(from: string, to: string): boolean {
     return VALID_TRANSITIONS.some(([f, t]) => f === from && t === to);
   }
+}
+
+// ── Canonical JSON (RFC 8785 / JCS) ──────────────────────────────────
+
+/**
+ * Serialize an object to canonical JSON per RFC 8785.
+ *
+ * Rules:
+ * - Object keys sorted lexicographically (Unicode code point order)
+ * - No insignificant whitespace
+ * - Applied recursively to all nested objects
+ * - Arrays preserve element order
+ * - Primitive values use standard JSON serialization
+ */
+export function canonicalJSON(value: unknown): string {
+  if (value === null || value === undefined) {
+    return 'null';
+  }
+  if (typeof value === 'boolean' || typeof value === 'number') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    const items = value.map(item => canonicalJSON(item));
+    return `[${items.join(',')}]`;
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    const pairs = keys
+      .filter(key => (value as Record<string, unknown>)[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${canonicalJSON((value as Record<string, unknown>)[key])}`);
+    return `{${pairs.join(',')}}`;
+  }
+  return JSON.stringify(value);
 }

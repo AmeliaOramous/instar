@@ -23,6 +23,7 @@ import type { HeartbeatManager, Heartbeat } from '../core/HeartbeatManager.js';
 import type { SecurityLog } from '../core/SecurityLog.js';
 import type { MachineAuthContext, MachineAuthDeps } from './machineAuth.js';
 import { machineAuthMiddleware, ChallengeStore } from './machineAuth.js';
+import type { MessageRouter } from '../messaging/MessageRouter.js';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -45,6 +46,8 @@ export interface MachineRouteContext {
   onPromote?: () => void;
   /** Callback to get current handoff readiness */
   onHandoffRequest?: () => Promise<{ ready: boolean; state?: unknown }>;
+  /** Message router for cross-machine message relay */
+  messageRouter?: MessageRouter | null;
 }
 
 // ── Route Factory ──────────────────────────────────────────────────
@@ -345,6 +348,34 @@ export function createMachineRoutes(ctx: MachineRouteContext): Router {
       type,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // ── POST /api/messages/relay-machine — Cross-machine message relay ──
+  // Protected by Machine-HMAC (5-header scheme). Envelope carries Ed25519 signature
+  // verified by the MessageRouter.relay() method.
+
+  router.post('/api/messages/relay-machine', authMiddleware, async (req, res) => {
+    if (!ctx.messageRouter) {
+      res.status(503).json({ error: 'Messaging not available' });
+      return;
+    }
+    try {
+      const envelope = req.body;
+      if (!envelope?.message?.id) {
+        res.status(400).json({ error: 'Invalid envelope' });
+        return;
+      }
+
+      // Ed25519 signature verification happens inside relay() for source='machine'
+      const accepted = await ctx.messageRouter.relay(envelope, 'machine');
+      if (accepted) {
+        res.json({ ok: true });
+      } else {
+        res.status(409).json({ error: 'Relay rejected (loop, duplicate, or invalid signature)' });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Relay failed' });
+    }
   });
 
   return router;

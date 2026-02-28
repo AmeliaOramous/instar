@@ -2025,11 +2025,20 @@ export async function startServer(options: StartOptions): Promise<void> {
     };
     const messageDelivery = new MessageDelivery(messageFormatter, tmuxOps);
     const machineId = coordinator.identity?.machineId ?? os.hostname();
+    // Build cross-machine deps if multi-machine is enabled
+    const crossMachineDeps = coordinator.enabled && coordinator.identity
+      ? {
+          identityManager: coordinator.managers.identityManager,
+          signingKeyPem: localSigningKeyPem,
+          nonceStore: coordinator.managers.nonceStore,
+          securityLog: coordinator.managers.securityLog,
+        }
+      : undefined;
     const messageRouter = new MessageRouter(messageStore, messageDelivery, {
       localAgent: config.projectName,
       localMachine: machineId,
       serverUrl: `http://localhost:${config.port}`,
-    });
+    }, crossMachineDeps);
     // Generate/persist agent token for cross-agent auth (idempotent — reuses existing token)
     const agentToken = generateAgentToken(config.projectName);
 

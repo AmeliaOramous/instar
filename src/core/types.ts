@@ -774,6 +774,8 @@ export interface MachineRegistryEntry {
   pairedAt: string;
   /** ISO timestamp of last heartbeat or activity */
   lastSeen: string;
+  /** Last known reachable URL (tunnel URL) — for cross-machine relay */
+  lastKnownUrl?: string;
   /** ISO timestamp of revocation (if revoked) */
   revokedAt?: string;
   /** Machine ID that revoked this one */

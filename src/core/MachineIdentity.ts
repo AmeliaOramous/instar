@@ -321,6 +321,29 @@ export class MachineIdentityManager {
   }
 
   /**
+   * Update a machine's last known URL (tunnel URL for cross-machine relay).
+   */
+  updateMachineUrl(machineId: string, url: string): void {
+    const registry = this.loadRegistry();
+    const entry = registry.machines[machineId];
+    if (!entry) throw new Error(ERRORS.MACHINE_NOT_FOUND(machineId));
+
+    entry.lastKnownUrl = url;
+    entry.lastSeen = new Date().toISOString();
+    this.saveRegistry(registry);
+  }
+
+  /**
+   * Get a machine's last known URL for cross-machine relay.
+   * Returns null if not known.
+   */
+  getMachineUrl(machineId: string): string | null {
+    const registry = this.loadRegistry();
+    const entry = registry.machines[machineId];
+    return entry?.lastKnownUrl ?? null;
+  }
+
+  /**
    * Revoke a machine. Marks it as revoked with reason.
    * Does NOT handle external secret rotation — caller must do that.
    */

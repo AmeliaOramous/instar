@@ -267,8 +267,8 @@ export { MessageStore } from './messaging/MessageStore.js';
 export { MessageFormatter } from './messaging/MessageFormatter.js';
 export { MessageDelivery } from './messaging/MessageDelivery.js';
 export type { TmuxOperations } from './messaging/MessageDelivery.js';
-export { MessageRouter } from './messaging/MessageRouter.js';
-export type { MessageRouterConfig } from './messaging/MessageRouter.js';
+export { MessageRouter, canonicalJSON } from './messaging/MessageRouter.js';
+export type { MessageRouterConfig, CrossMachineDeps } from './messaging/MessageRouter.js';
 export {
   generateAgentToken,
   getAgentToken,
