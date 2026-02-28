@@ -8,19 +8,19 @@
 
 ## What Changed
 
-**Security fix**: `computeDropHmac` in `AgentTokenManager.ts` was using `JSON.stringify(fields, arrayReplacer)` to serialize the HMAC payload. The array replacer (`["message", "nonce", "originServer", "timestamp"]`) filtered properties at all nesting levels, causing the `message` object to serialize as `{}`. This meant HMAC-SHA256 signatures on offline message drops never covered the actual message content (body, subject, from, to, etc.). Message body tampering in the drop directory was invisible to verification.
-
-Fixed by replacing the broken serializer with a proper recursive `canonicalJSON` function that sorts keys at every nesting level, matching the existing `canonicalJSON` used for Ed25519 cross-machine signatures.
-
-**Testing**: Added 90 new messaging tests (37 unit + 38 E2E + 15 integration), bringing messaging test coverage from 66 to 223 tests across 10 files. The HMAC bug was discovered by the new E2E multi-agent tamper detection test.
+<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
+<!-- Write this for the AGENT — they need to understand the system deeply. -->
 
 ## What to Tell Your User
 
-- **Security fix**: "Offline message drops are now properly tamper-protected. The HMAC signature on dropped messages was not covering the actual message content due to a serialization bug — that's fixed now."
+<!-- Write talking points the agent should relay to their user. -->
+<!-- This should be warm, conversational, user-facing — not a changelog. -->
+<!-- Focus on what THEY can now do, not internal plumbing. -->
+
+- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| HMAC tamper protection fix | Automatic — drop files now have correct HMAC coverage |
-| 223 messaging tests | `npx vitest run tests/unit/agent-token-manager.test.ts tests/e2e/messaging-multi-agent.test.ts` (and 8 others) |
+| [Capability] | [Endpoint, command, or "automatic"] |
