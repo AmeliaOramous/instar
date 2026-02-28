@@ -144,9 +144,30 @@ export function computeDropHmac(
   agentToken: string,
   fields: { message: unknown; originServer: string; nonce: string; timestamp: string },
 ): string {
-  // Canonical JSON: sorted keys, no whitespace (deterministic)
-  const canonical = JSON.stringify(fields, Object.keys(fields).sort());
+  // Canonical JSON: recursively sorted keys at all nesting levels.
+  // NOTE: Cannot use JSON.stringify(fields, arrayReplacer) because array replacers
+  // filter properties at EVERY nesting level, stripping inner message properties.
+  const canonical = canonicalJSON(fields);
   return crypto.createHmac('sha256', agentToken).update(canonical).digest('hex');
+}
+
+/**
+ * Serialize an object to canonical JSON (RFC 8785 / JCS).
+ * Recursively sorts keys at all nesting levels for deterministic output.
+ */
+function canonicalJSON(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'boolean' || typeof value === 'number') return JSON.stringify(value);
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(',')}]`;
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    const pairs = keys
+      .filter(key => (value as Record<string, unknown>)[key] !== undefined)
+      .map(key => `${JSON.stringify(key)}:${canonicalJSON((value as Record<string, unknown>)[key])}`);
+    return `{${pairs.join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 /**

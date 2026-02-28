@@ -25,6 +25,8 @@ import {
 import type { TempProject, MockSessionManager } from '../helpers/setup.js';
 import { generateAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import type { InstarConfig } from '../../src/core/types.js';
+import { deleteAgentToken } from '../../src/messaging/AgentTokenManager.js';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -103,6 +105,7 @@ describe('Inter-Agent Messaging API routes', () => {
   afterAll(async () => {
     await server.stop();
     await messageStore.destroy();
+    deleteAgentToken('test-messaging-project');
     project.cleanup();
   });
 
@@ -395,6 +398,338 @@ describe('Inter-Agent Messaging API routes', () => {
       expect(res.body.delivery).toBeDefined();
       expect(res.body.rateLimiting).toBeDefined();
       expect(res.body.threads).toBeDefined();
+    });
+
+    it('stats reflect actual message volume', async () => {
+      const res = await request(app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+
+      // We've sent several messages in previous tests
+      expect(res.body.volume.sent.total).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  // ── Send Options (threadId, inReplyTo, TTL) ──────────────────────
+
+  describe('send with options', () => {
+    it('auto-creates threadId for query type', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'opt-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'opt-2', machine: 'local' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Thread creation test',
+          body: 'Should have threadId',
+        })
+        .expect(201);
+
+      expect(res.body.threadId).toBeDefined();
+      expect(res.body.threadId).toMatch(/^[a-f0-9-]{36}$/);
+    });
+
+    it('auto-creates threadId for request type', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'opt-3', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'opt-4', machine: 'local' },
+          type: 'request',
+          priority: 'medium',
+          subject: 'Request thread test',
+          body: 'Should have threadId too',
+        })
+        .expect(201);
+
+      expect(res.body.threadId).toBeDefined();
+    });
+
+    it('does not auto-create threadId for info type', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'opt-5', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'opt-6', machine: 'local' },
+          type: 'info',
+          priority: 'low',
+          subject: 'No thread expected',
+          body: 'Info messages do not auto-create threads',
+        })
+        .expect(201);
+
+      expect(res.body.threadId).toBeUndefined();
+    });
+
+    it('passes through options.threadId for response type', async () => {
+      const threadId = crypto.randomUUID();
+      const inReplyTo = crypto.randomUUID();
+
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'opt-7', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'opt-8', machine: 'local' },
+          type: 'response',
+          priority: 'medium',
+          subject: 'Response with thread',
+          body: 'Continuing the conversation',
+          options: { threadId, inReplyTo },
+        })
+        .expect(201);
+
+      expect(res.body.threadId).toBe(threadId);
+
+      // Verify the stored message has inReplyTo
+      const stored = await messageStore.get(res.body.messageId);
+      expect(stored!.message.inReplyTo).toBe(inReplyTo);
+    });
+
+    it('respects custom TTL via options', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'ttl-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'ttl-2', machine: 'local' },
+          type: 'info',
+          priority: 'low',
+          subject: 'Custom TTL',
+          body: 'Short-lived message',
+          options: { ttlMinutes: 5 },
+        })
+        .expect(201);
+
+      const stored = await messageStore.get(res.body.messageId);
+      expect(stored!.message.ttlMinutes).toBe(5);
+    });
+  });
+
+  // ── Ack Edge Cases ───────────────────────────────────────────────
+
+  describe('ack edge cases', () => {
+    it('ack on non-existent message returns success (no-op)', async () => {
+      // acknowledge is a no-op for unknown messages (doesn't throw)
+      const res = await request(app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          messageId: crypto.randomUUID(),
+          sessionId: 'any-session',
+        })
+        .expect(200);
+
+      expect(res.body.ok).toBe(true);
+    });
+
+    it('ack on sent-but-not-delivered message is no-op (invalid transition)', async () => {
+      // Send a message (stays in 'sent' phase for local delivery)
+      const sendRes = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'ack-edge-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'ack-edge-2', machine: 'local' },
+          type: 'info',
+          priority: 'low',
+          subject: 'Premature ack test',
+          body: 'Ack before delivery',
+        })
+        .expect(201);
+
+      // Try to ack before delivery — should be no-op (sent → read is invalid transition)
+      await request(app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          messageId: sendRes.body.messageId,
+          sessionId: 'test-session',
+        })
+        .expect(200);
+
+      // Phase should still be 'sent', not 'read'
+      const stored = await messageStore.get(sendRes.body.messageId);
+      expect(stored!.delivery.phase).toBe('sent');
+    });
+
+    it('double ack on same message is idempotent', async () => {
+      const sendRes = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'ack-double-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'ack-double-2', machine: 'local' },
+          type: 'info',
+          priority: 'low',
+          subject: 'Double ack test',
+          body: 'Ack twice',
+        })
+        .expect(201);
+
+      // Simulate delivery
+      await messageStore.updateDelivery(sendRes.body.messageId, {
+        phase: 'delivered',
+        transitions: [
+          { from: 'created', to: 'sent', at: new Date().toISOString() },
+          { from: 'sent', to: 'delivered', at: new Date().toISOString() },
+        ],
+        attempts: 1,
+      });
+
+      // First ack
+      await request(app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({ messageId: sendRes.body.messageId, sessionId: 's1' })
+        .expect(200);
+
+      // Second ack — should also succeed (no-op)
+      await request(app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({ messageId: sendRes.body.messageId, sessionId: 's1' })
+        .expect(200);
+
+      // Phase should be 'read'
+      const stored = await messageStore.get(sendRes.body.messageId);
+      expect(stored!.delivery.phase).toBe('read');
+    });
+  });
+
+  // ── Input Validation Edge Cases ──────────────────────────────────
+
+  describe('input validation edge cases', () => {
+    it('rejects send with empty body', async () => {
+      await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 's1', machine: 'm' },
+          to: { agent: 'test-agent', session: 's2', machine: 'local' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Empty body test',
+          body: '', // Empty string
+        })
+        .expect(400);
+    });
+
+    it('rejects send with empty subject', async () => {
+      await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 's1', machine: 'm' },
+          to: { agent: 'test-agent', session: 's2', machine: 'local' },
+          type: 'info',
+          priority: 'medium',
+          subject: '',
+          body: 'Has body but no subject',
+        })
+        .expect(400);
+    });
+
+    it('rejects send with null from field', async () => {
+      await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: null,
+          to: { agent: 'test-agent', session: 's2', machine: 'local' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Null from field',
+          body: 'Test',
+        })
+        .expect(400);
+    });
+
+    it('rejects relay-agent with empty message.id', async () => {
+      await request(app)
+        .post('/messages/relay-agent')
+        .set('Authorization', `Bearer ${relayAgentToken}`)
+        .send({
+          schemaVersion: 1,
+          message: { id: '' }, // Empty ID
+          transport: { relayChain: [], originServer: 'x', nonce: 'x', timestamp: 'x' },
+          delivery: { phase: 'sent', transitions: [], attempts: 0 },
+        })
+        .expect(400);
+    });
+
+    it('accepts message with maximum-length subject and body', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'long-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'long-2', machine: 'local' },
+          type: 'info',
+          priority: 'low',
+          subject: 'A'.repeat(500),
+          body: 'B'.repeat(10000),
+        })
+        .expect(201);
+
+      const stored = await messageStore.get(res.body.messageId);
+      expect(stored!.message.subject).toHaveLength(500);
+      expect(stored!.message.body).toHaveLength(10000);
+    });
+  });
+
+  // ── Message Delivery Phase Tracking ──────────────────────────────
+
+  describe('delivery phase tracking', () => {
+    it('message transitions through phases correctly', async () => {
+      // Send
+      const sendRes = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'phase-1', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'phase-2', machine: 'local' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Phase tracking test',
+          body: 'Follow the phases',
+        })
+        .expect(201);
+
+      const id = sendRes.body.messageId;
+
+      // Phase 1: 'sent'
+      let msg = await messageStore.get(id);
+      expect(msg!.delivery.phase).toBe('sent');
+      expect(msg!.delivery.transitions.length).toBe(1);
+      expect(msg!.delivery.transitions[0].from).toBe('created');
+      expect(msg!.delivery.transitions[0].to).toBe('sent');
+
+      // Simulate Phase 2: 'delivered'
+      await messageStore.updateDelivery(id, {
+        phase: 'delivered',
+        transitions: [
+          ...msg!.delivery.transitions,
+          { from: 'sent', to: 'delivered', at: new Date().toISOString() },
+        ],
+        attempts: 1,
+      });
+
+      // Phase 3: 'read' via ack
+      await request(app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({ messageId: id, sessionId: 'phase-2' })
+        .expect(200);
+
+      msg = await messageStore.get(id);
+      expect(msg!.delivery.phase).toBe('read');
+      expect(msg!.delivery.transitions.length).toBe(3);
     });
   });
 });

@@ -155,6 +155,22 @@ The E2E test must mirror how `server.ts` initializes the feature:
 
 If `server.ts` changes its initialization pattern and the E2E test doesn't break, the E2E test is wrong.
 
+## Case Study: The HMAC Bug That Only E2E Caught (2026-02-28)
+
+The inter-agent messaging system uses HMAC-SHA256 to protect offline message drops from tampering. When an agent drops a message to disk for an offline agent, it signs the envelope. When the offline agent starts up and picks up the message, it verifies the HMAC.
+
+**What the unit tests said**: All passing. `computeDropHmac` + `verifyDropHmac` paired tests worked perfectly. Generate HMAC, verify it — match. Tamper with the HMAC string — rejection. Different agent — rejection. All green.
+
+**What was actually happening**: `computeDropHmac` used `JSON.stringify(fields, Object.keys(fields).sort())` as a "canonical" serializer. The replacer array was `["message", "nonce", "originServer", "timestamp"]`. But `JSON.stringify` array replacers filter properties at **every nesting level** — not just the top. Since the `message` object's properties (`id`, `from`, `to`, `body`, `subject`, etc.) weren't in that array, they were all stripped. The `message` property serialized as `{}` regardless of content.
+
+**Why unit tests couldn't catch this**: Unit tests compute and verify in pairs — both sides use the same broken serializer. A consistently broken hash is still consistent. The HMAC matched every time because both computation and verification stripped the message content identically. The unit tests proved the system was *self-consistent*, not that it was *correct*.
+
+**Why the E2E test caught it**: The E2E multi-agent test (`messaging-multi-agent.test.ts`) sent a real message from Agent A's server to an offline agent via the drop directory, then tampered with `envelope.message.body` in the JSON file on disk, then ran `pickupDroppedMessages()` with a separate store. The tampered body should have invalidated the HMAC — but it didn't, because the HMAC never covered the body in the first place. The test expected `result.rejected === 1` but got `result.rejected === 0`.
+
+**The fix**: Replaced the broken `JSON.stringify` replacer with a proper recursive `canonicalJSON` function that sorts keys at every nesting level.
+
+**The lesson**: Unit tests prove *consistency*. E2E tests prove *correctness*. A security-critical function with 100% unit test coverage had a total bypass bug that only surfaced when two real components interacted through the filesystem with real data mutations in between. This is why E2E tests are non-optional.
+
 ## When to Write E2E Tests
 
 Required for any feature that:

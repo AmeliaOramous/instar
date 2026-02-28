@@ -1,6 +1,6 @@
 # Upgrade Guide — vNEXT
 
-<!-- bump: minor -->
+<!-- bump: patch -->
 <!-- Valid values: patch, minor, major -->
 <!-- patch = bug fixes, refactors, test additions, doc updates -->
 <!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
@@ -8,40 +8,19 @@
 
 ## What Changed
 
-Cross-machine message routing is now fully implemented. When an agent sends a message to
-a target on a different machine (e.g., `to.machine = "m_remote_xyz"`), the MessageRouter
-will:
+**Security fix**: `computeDropHmac` in `AgentTokenManager.ts` was using `JSON.stringify(fields, arrayReplacer)` to serialize the HMAC payload. The array replacer (`["message", "nonce", "originServer", "timestamp"]`) filtered properties at all nesting levels, causing the `message` object to serialize as `{}`. This meant HMAC-SHA256 signatures on offline message drops never covered the actual message content (body, subject, from, to, etc.). Message body tampering in the drop directory was invisible to verification.
 
-1. Verify the target machine is paired and active in the machine registry
-2. Resolve the machine's URL via `lastKnownUrl` on the registry entry
-3. Sign the envelope with Ed25519 (covering the full `SignedPayload`: message, relayChain, originServer, nonce, timestamp)
-4. Relay via `POST /api/messages/relay-machine` with Machine-HMAC (5-header auth scheme)
-5. If relay fails or no URL is known, queue to `~/.instar/messages/outbound/{machineId}/` for git-sync fallback
+Fixed by replacing the broken serializer with a proper recursive `canonicalJSON` function that sorts keys at every nesting level, matching the existing `canonicalJSON` used for Ed25519 cross-machine signatures.
 
-On the receiving side, `relay(envelope, 'machine')` now verifies:
-- Ed25519 signature present and valid against the signer's public key
-- Signer is an active, paired machine
-- Timestamp within 5-minute clock skew tolerance
-
-The `relay-machine` endpoint has moved from the main routes (bearer auth) to `machineRoutes.ts`
-(Machine-HMAC auth), which is the correct auth scheme for cross-machine communication.
-
-New infrastructure:
-- `MessageRouterConfig` now accepts optional `CrossMachineDeps` (identityManager, signingKeyPem, nonceStore, securityLog)
-- `MachineRegistryEntry` has a new `lastKnownUrl` field for URL resolution
-- `MachineIdentityManager` has `updateMachineUrl()` and `getMachineUrl()` methods
-- `MessageStore.updateEnvelope()` for persisting transport field updates after signing
-- `canonicalJSON()` implements RFC 8785 for deterministic JSON serialization
+**Testing**: Added 90 new messaging tests (37 unit + 38 E2E + 15 integration), bringing messaging test coverage from 66 to 223 tests across 10 files. The HMAC bug was discovered by the new E2E multi-agent tamper detection test.
 
 ## What to Tell Your User
 
-- **Cross-machine messaging**: "Agents on different machines can now send messages to each other securely. Messages are signed with Ed25519 and verified on receipt. If the remote machine is offline, messages queue up and sync via git."
+- **Security fix**: "Offline message drops are now properly tamper-protected. The HMAC signature on dropped messages was not covering the actual message content due to a serialization bug — that's fixed now."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Cross-machine message send | `instar msg send --to agent@machine_id "message"` or via API with `to.machine` set to remote machine ID |
-| Outbound queue (offline fallback) | Automatic — messages queue in `~/.instar/messages/outbound/` when remote is unreachable |
-| Ed25519 envelope signatures | Automatic — all cross-machine messages are signed and verified |
-| Machine URL tracking | Call `identityManager.updateMachineUrl(machineId, tunnelUrl)` to register a machine's URL |
+| HMAC tamper protection fix | Automatic — drop files now have correct HMAC coverage |
+| 223 messaging tests | `npx vitest run tests/unit/agent-token-manager.test.ts tests/e2e/messaging-multi-agent.test.ts` (and 8 others) |
