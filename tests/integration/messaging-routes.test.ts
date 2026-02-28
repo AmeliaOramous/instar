@@ -24,6 +24,7 @@ import {
 } from '../helpers/setup.js';
 import type { TempProject, MockSessionManager } from '../helpers/setup.js';
 import { generateAgentToken } from '../../src/messaging/AgentTokenManager.js';
+import { SessionSummarySentinel } from '../../src/messaging/SessionSummarySentinel.js';
 import type { InstarConfig } from '../../src/core/types.js';
 import { deleteAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import crypto from 'node:crypto';
@@ -91,11 +92,18 @@ describe('Inter-Agent Messaging API routes', () => {
     // Generate agent token for relay-agent auth
     relayAgentToken = generateAgentToken(config.projectName);
 
+    const summarySentinel = new SessionSummarySentinel({
+      stateDir: project.stateDir,
+      getActiveSessions: () => [],
+      captureOutput: () => null,
+    });
+
     server = new AgentServer({
       config,
       sessionManager: mockSM as any,
       state: project.state,
       messageRouter,
+      summarySentinel,
     });
 
     await server.start();
@@ -1292,6 +1300,55 @@ describe('Inter-Agent Messaging API routes', () => {
         .set('Authorization', `Bearer ${AUTH_TOKEN}`)
         .expect(200);
       expect(res.body.delivery.phase).toBe('expired');
+    });
+  });
+
+  // ── Session Summaries & Routing ─────────────────────────────
+
+  describe('session summary routes', () => {
+    it('GET /messages/summaries returns summary list and status', async () => {
+      const res = await request(app)
+        .get('/messages/summaries')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+
+      expect(res.body.summaries).toBeDefined();
+      expect(Array.isArray(res.body.summaries)).toBe(true);
+      expect(res.body.status).toBeDefined();
+      expect(typeof res.body.status.summaryCount).toBe('number');
+      expect(typeof res.body.status.inFallback).toBe('boolean');
+    });
+
+    it('GET /messages/route-score requires subject and body', async () => {
+      await request(app)
+        .get('/messages/route-score')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(400);
+    });
+
+    it('GET /messages/route-score returns scores array', async () => {
+      const res = await request(app)
+        .get('/messages/route-score')
+        .query({ subject: 'Database fix', body: 'Need to update prisma schema' })
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+
+      expect(res.body.scores).toBeDefined();
+      expect(Array.isArray(res.body.scores)).toBe(true);
+      expect(typeof res.body.inFallback).toBe('boolean');
+    });
+
+    it('GET /messages/summaries requires auth', async () => {
+      await request(app)
+        .get('/messages/summaries')
+        .expect(401);
+    });
+
+    it('GET /messages/route-score requires auth', async () => {
+      await request(app)
+        .get('/messages/route-score')
+        .query({ subject: 'Test', body: 'Test' })
+        .expect(401);
     });
   });
 });

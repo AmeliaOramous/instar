@@ -53,6 +53,7 @@ import type { SemanticMemory } from '../memory/SemanticMemory.js';
 import type { SessionActivitySentinel } from '../monitoring/SessionActivitySentinel.js';
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
 import type { MessageRouter } from '../messaging/MessageRouter.js';
+import type { SessionSummarySentinel } from '../messaging/SessionSummarySentinel.js';
 import type { MessageType, MessagePriority, MessageFilter } from '../messaging/types.js';
 import { verifyAgentToken } from '../messaging/AgentTokenManager.js';
 import type { WorkingMemoryAssembler } from '../memory/WorkingMemoryAssembler.js';
@@ -95,6 +96,7 @@ export interface RouteContext {
   semanticMemory: SemanticMemory | null;
   activitySentinel: SessionActivitySentinel | null;
   messageRouter: MessageRouter | null;
+  summarySentinel: SessionSummarySentinel | null;
   workingMemory: WorkingMemoryAssembler | null;
   quotaManager: QuotaManager | null;
   startTime: Date;
@@ -4426,6 +4428,42 @@ export function createRoutes(ctx: RouteContext): Router {
       res.json(stats);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Stats failed' });
+    }
+  });
+
+  router.get('/messages/summaries', async (req, res) => {
+    if (!ctx.summarySentinel) {
+      res.status(503).json({ error: 'Session summaries not available' });
+      return;
+    }
+    try {
+      const summaries = ctx.summarySentinel.getAllSummaries();
+      const status = ctx.summarySentinel.getStatus();
+      res.json({ summaries, status });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Summaries failed' });
+    }
+  });
+
+  router.get('/messages/route-score', async (req, res) => {
+    if (!ctx.summarySentinel) {
+      res.status(503).json({ error: 'Session summaries not available' });
+      return;
+    }
+    try {
+      const { subject, body } = req.query;
+      if (!subject || !body) {
+        res.status(400).json({ error: 'Missing required query params: subject, body' });
+        return;
+      }
+      const scores = ctx.summarySentinel.findBestSession(
+        subject as string,
+        body as string,
+        ctx.config.projectName,
+      );
+      res.json({ scores, inFallback: ctx.summarySentinel.isInFallbackMode() });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Route scoring failed' });
     }
   });
 

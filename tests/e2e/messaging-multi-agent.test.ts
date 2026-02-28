@@ -36,6 +36,7 @@ import {
   computeDropHmac,
 } from '../../src/messaging/AgentTokenManager.js';
 import { pickupDroppedMessages } from '../../src/messaging/DropPickup.js';
+import { SessionSummarySentinel } from '../../src/messaging/SessionSummarySentinel.js';
 import type { InstarConfig } from '../../src/core/types.js';
 import type { MessageEnvelope } from '../../src/messaging/types.js';
 import { registerAgent, unregisterAgent } from '../../src/core/AgentRegistry.js';
@@ -112,11 +113,18 @@ async function createTestAgent(name: string): Promise<TestAgent> {
   const state = new StateManager(stateDir);
   const mockSM = createMockSessionManager();
 
+  const summarySentinel = new SessionSummarySentinel({
+    stateDir,
+    getActiveSessions: () => [],
+    captureOutput: () => null,
+  });
+
   const server = new AgentServer({
     config,
     sessionManager: mockSM as any,
     state,
     messageRouter: router,
+    summarySentinel,
   });
 
   await server.start();
@@ -1372,6 +1380,54 @@ describe('E2E: Multi-Agent Messaging (same machine)', () => {
         .set('Authorization', `Bearer ${agentB.authToken}`)
         .expect(200);
       expect(finalStats.body.volume.deadLettered.total).toBeGreaterThan(initialDeadLetters);
+    });
+  });
+
+  // ── Phase 2: Session Summaries & Intelligent Routing ──────
+
+  describe('session summaries and routing (E2E)', () => {
+    it('GET /messages/summaries returns from both agents', async () => {
+      const resA = await request(agentA.app)
+        .get('/messages/summaries')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(resA.body.summaries).toBeDefined();
+      expect(resA.body.status).toBeDefined();
+
+      const resB = await request(agentB.app)
+        .get('/messages/summaries')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(resB.body.summaries).toBeDefined();
+    });
+
+    it('GET /messages/route-score scores sessions for targeted routing', async () => {
+      const res = await request(agentA.app)
+        .get('/messages/route-score')
+        .query({ subject: 'Test routing', body: 'Does this work correctly?' })
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(res.body.scores).toBeDefined();
+      expect(Array.isArray(res.body.scores)).toBe(true);
+      expect(typeof res.body.inFallback).toBe('boolean');
+    });
+
+    it('route-score returns 400 without required params', async () => {
+      await request(agentA.app)
+        .get('/messages/route-score')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(400);
+    });
+
+    it('summaries and route-score require auth', async () => {
+      await request(agentA.app)
+        .get('/messages/summaries')
+        .expect(401);
+
+      await request(agentA.app)
+        .get('/messages/route-score')
+        .query({ subject: 'Test', body: 'Test' })
+        .expect(401);
     });
   });
 });

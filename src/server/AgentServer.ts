@@ -87,6 +87,7 @@ export class AgentServer {
     workingMemory?: import('../memory/WorkingMemoryAssembler.js').WorkingMemoryAssembler;
     quotaManager?: import('../monitoring/QuotaManager.js').QuotaManager;
     messageRouter?: MessageRouter;
+    summarySentinel?: import('../messaging/SessionSummarySentinel.js').SessionSummarySentinel;
     coordinator?: MultiMachineCoordinator;
     localSigningKeyPem?: string;
   }) {
@@ -226,6 +227,7 @@ export class AgentServer {
       workingMemory: options.workingMemory ?? null,
       quotaManager: options.quotaManager ?? null,
       messageRouter: options.messageRouter ?? null,
+      summarySentinel: options.summarySentinel ?? null,
       startTime: this.startTime,
     });
     this.app.use(routes);

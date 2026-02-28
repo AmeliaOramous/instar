@@ -77,6 +77,8 @@ export class MessageRouter implements IMessageRouter {
   private readonly crossMachine: CrossMachineDeps | null;
   /** Monotonic sequence counter for Machine-HMAC outgoing requests */
   private machineSequence: number = 0;
+  /** Optional summary sentinel for intelligent routing */
+  private summarySentinel: import('./SessionSummarySentinel.js').SessionSummarySentinel | null = null;
 
   constructor(
     store: MessageStore,
@@ -90,6 +92,11 @@ export class MessageRouter implements IMessageRouter {
     this.crossMachine = crossMachine ?? null;
   }
 
+  /** Attach a summary sentinel for intelligent routing (session: "best") */
+  setSummarySentinel(sentinel: import('./SessionSummarySentinel.js').SessionSummarySentinel): void {
+    this.summarySentinel = sentinel;
+  }
+
   async send(
     from: AgentMessage['from'],
     to: AgentMessage['to'],
@@ -99,6 +106,18 @@ export class MessageRouter implements IMessageRouter {
     body: string,
     options?: SendMessageOptions,
   ): Promise<SendResult> {
+    // Intelligent routing: resolve session: "best" to actual session
+    if (to.session === 'best' && this.summarySentinel) {
+      const isLocal = to.machine === 'local' || to.machine === this.config.localMachine;
+      if (isLocal && to.agent === this.config.localAgent) {
+        const scores = this.summarySentinel.findBestSession(subject, body, to.agent);
+        if (scores.length > 0) {
+          to = { ...to, session: scores[0].tmuxSession };
+        }
+        // If no match, keep "best" — it will be queued for the next available session
+      }
+    }
+
     // Echo prevention: cannot send to the same session on the same agent
     if (
       from.agent === to.agent &&

@@ -2062,9 +2062,28 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     retryManager.start();
 
+    // Session summary sentinel for intelligent routing (Phase 2)
+    const { SessionSummarySentinel } = await import('../messaging/SessionSummarySentinel.js');
+    const summarySentinel = new SessionSummarySentinel({
+      stateDir: config.stateDir,
+      getActiveSessions: () => sessionManager.listRunningSessions(),
+      captureOutput: (tmuxSession: string) => {
+        try {
+          const tmuxBin = detectTmuxPath();
+          if (!tmuxBin) return null;
+          const output = execFileSync(tmuxBin, ['capture-pane', '-t', `=${tmuxSession}:`, '-p'], {
+            encoding: 'utf-8', timeout: 5000,
+          });
+          return output;
+        } catch { return null; } // @silent-fallback-ok — tmux capture-pane for sentinel
+      },
+    });
+    summarySentinel.start();
+    messageRouter.setSummarySentinel(summarySentinel);
+
     console.log(pc.green(`  Inter-agent messaging: enabled (token: ${agentToken.slice(0, 8)}...)${dropSummary}`));
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
@@ -2262,6 +2281,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       await notificationBatcher.flushAll(); // Drain pending notifications before exit
       notificationBatcher.stop();
       retryManager.stop();
+      summarySentinel.stop();
       memoryMonitor.stop();
       caffeinateManager.stop();
       sleepWakeDetector.stop();
