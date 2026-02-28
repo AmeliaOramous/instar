@@ -81,6 +81,8 @@ echo "--- COGNITIVE PRINCIPLES (always active) ---"
 echo "1. SUBSTANCE OVER LABELS: Identity is content, not metadata. Different titles/IDs/statuses can hide identical content. Always verify at the content level."
 echo "2. CONTRADICTION = NEW CHECK: When a human contradicts your data, run a DIFFERENT kind of check, not the same one again. The human has information you don't."
 echo "3. CONFIDENCE INVERSION: The more obvious something feels, the more it needs verification. High confidence is where errors hide."
+echo "4. INHERITED CLAIMS: Handoff notes and previous session logs are CLAIMS TO VERIFY, not facts. Any claim about external state (repo, deployment, service, file) requires a verification command in THIS session. No command, no claim."
+echo "5. DISMISSAL WITHOUT INVESTIGATION: Never resolve a bug report or feedback item based on the title alone. Trace the reporter's actual code path first. If your resolution says 'this theoretically can't happen' — you haven't investigated."
 echo "--- END PRINCIPLES ---"
 echo ""
 
@@ -164,6 +166,38 @@ except Exception as e:
           echo "--- END TELEGRAM CONTEXT ---"
           echo "Continuity restored. Resume the conversation naturally."
         fi
+      fi
+    fi
+  fi
+fi
+
+# Phase G: Working Memory Assembly — inject relevant semantic knowledge after compaction
+# This surfaces what you already know that's relevant to the current context,
+# preventing you from re-deriving knowledge you've already accumulated.
+if [ -f "$CONFIG_FILE" ]; then
+  PORT=$(grep -o '"port":[0-9]*' "$CONFIG_FILE" | head -1 | cut -d':' -f2)
+  if [ -n "$PORT" ]; then
+    AUTH_TOKEN=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('authToken',''))" 2>/dev/null)
+    WORKING_MEM=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
+      "http://localhost:${PORT}/context/working-memory?prompt=compaction-recovery&limit=5" 2>/dev/null)
+    if [ -n "$WORKING_MEM" ]; then
+      CONTEXT=$(echo "$WORKING_MEM" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    ctx = data.get('context', '')
+    tokens = data.get('estimatedTokens', 0)
+    if ctx and tokens > 0:
+        print(f'[{tokens} tokens assembled from memory]')
+        print(ctx)
+except Exception:
+    pass
+" 2>/dev/null)
+      if [ -n "$CONTEXT" ]; then
+        echo ""
+        echo "--- WORKING MEMORY (relevant knowledge restored after compaction) ---"
+        echo "$CONTEXT"
+        echo "--- END WORKING MEMORY ---"
       fi
     fi
   fi
