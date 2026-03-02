@@ -1,6 +1,6 @@
 # Upgrade Guide — vNEXT
 
-<!-- bump: minor -->
+<!-- bump: patch -->
 <!-- Valid values: patch, minor, major -->
 <!-- patch = bug fixes, refactors, test additions, doc updates -->
 <!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
@@ -8,46 +8,14 @@
 
 ## What Changed
 
-### Temporal Coherence Checker
-
-New module that detects when draft content reflects outdated thinking — perspectives the agent has since evolved past. Born from a real incident: a draft written weeks earlier used "death" framing for a concept the agent had since reframed as "choice," creating public incoherence.
-
-**`TemporalCoherenceChecker`** (`src/core/TemporalCoherenceChecker.ts`):
-- Compares draft content against agent identity documents (AGENT.md, reflections), published content timeline (PlatformActivityRegistry), and canonical state quick facts (CanonicalState)
-- Uses `IntelligenceProvider` for LLM-based evaluation with configurable severity capping
-- Returns structured results: `COHERENT`, `EVOLVED`, or `OUTDATED` assessment with specific issues
-- Gracefully degrades to "no issues" when no IntelligenceProvider is configured
-
-**Integration points:**
-- Standalone: `checker.check(draftContent)` → `TemporalCoherenceResult`
-- With PlatformActivityRegistry: Auto-loads published content timeline for comparison
-- With CanonicalState: Auto-loads agent's current positions on key topics
-- With CoherenceGate: Can be combined for layered pre-publish safety
-
-**Configuration:**
-- `stateDocuments`: Custom paths to identity documents (default: AGENT.md, .instar/reflections.md)
-- `maxSeverity`: Cap severity at WARN to prevent temporal checks from blocking (recommended)
-- `maxCharsPerDocument`: Control prompt budget (default: 2000)
-- `timelineWindowHours`: How far back to look in published content (default: 720 = 30 days)
-
-### Convergence Check — 7th Criterion
-
-The heuristic convergence check (`convergence-check.sh`) now includes a 7th criterion: **temporal_staleness**. Catches language patterns suggesting stale drafts ("I used to think", "back when I first", "my early understanding", "before I learned", etc.). Zero-cost pre-filter — no LLM calls.
-
-Updated both the template file and the PostUpdateMigrator inline fallback.
+**SemanticMemory disk I/O error now includes diagnostic guidance**: When SQLite fails to open `semantic.db` due to a disk I/O error (SQLITE_IOERR), the degradation report now includes actionable instructions — specifically to run `df -h` to check disk space and the path to the affected database file. Previously this was an opaque error message with no indication of how to recover.
 
 ## What to Tell Your User
 
-- **"Your agent won't accidentally post outdated thinking"**: If your agent's understanding has evolved since a draft was written, the temporal coherence checker catches the mismatch before publishing. Think of it as a "is this still what I think?" check.
-
-- **"The convergence check now catches 7 anti-patterns"**: The pre-messaging quality gate now includes temporal staleness detection alongside capability claims, commitment overreach, settling, experiential fabrication, sycophancy, and URL provenance.
+- **Clearer disk errors**: If your knowledge graph fails to load with a disk error, Instar will now tell you exactly what to check and which file is affected. Makes it much easier to diagnose "disk full" situations.
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Temporal coherence check (LLM) | `new TemporalCoherenceChecker(config)` then `checker.check(draft)` |
-| Temporal staleness heuristic | Automatic — included in convergence-check.sh criterion #7 |
-| Severity capping | Set `maxSeverity: 'WARN'` in config to prevent temporal blocking |
-| Published content timeline | Pass `activityRegistry` to auto-load comparison timeline |
-| Canonical state integration | Pass `canonicalState` to include quick facts in evaluation |
+| Actionable SemanticMemory disk error messages | Automatic — shown in server startup output and Telegram alerts |

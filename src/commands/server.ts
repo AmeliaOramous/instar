@@ -1452,8 +1452,12 @@ export async function startServer(options: StartOptions): Promise<void> {
         console.log(pc.yellow(`  Vector search: ${vecErr instanceof Error ? vecErr.message : String(vecErr)}. FTS5-only mode.`));
       }
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      let reason = err instanceof Error ? err.message : String(err);
       semanticMemory = undefined;
+      // Add actionable guidance for disk I/O errors (SQLITE_IOERR) — disk full or failing
+      if (reason.toLowerCase().includes('disk i/o') || reason.includes('SQLITE_IOERR')) {
+        reason += '. Likely cause: disk full or filesystem error. Diagnose: run `df -h` to check disk usage and free space if needed. Semantic.db path: ' + path.join(config.stateDir, 'semantic.db');
+      }
       DegradationReporter.getInstance().report({
         feature: 'SemanticMemory',
         primary: 'SQLite-backed knowledge graph with FTS5 + vector hybrid search',
