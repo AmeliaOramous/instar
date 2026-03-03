@@ -381,16 +381,11 @@ export class AutoUpdater {
 
       console.log(`[AutoUpdater] Updated: v${result.previousVersion} → v${result.newVersion}`);
 
-      // Notify via Telegram
-      const guideExists = this.hasUpgradeGuide(result.newVersion);
-      const summaryNote = guideExists
-        ? ` I'll send you a summary of what's new once I'm back up.`
-        : '';
-
       if (result.restartNeeded) {
-        await this.gatedRestart(result.newVersion!, summaryNote);
+        await this.gatedRestart(result.newVersion!);
       } else {
-        await this.notify(`Just updated to v${result.newVersion}.${summaryNote}`);
+        // No restart needed — silent update. Don't notify the user.
+        console.log(`[AutoUpdater] Update applied (no restart needed): v${result.newVersion}`);
       }
     } catch (err) {
       this.isApplying = false;
@@ -405,12 +400,10 @@ export class AutoUpdater {
    * If sessions are active, defers and retries on a timer.
    * After max deferral, restarts regardless with warnings.
    */
-  private async gatedRestart(newVersion: string, summaryNote: string): Promise<void> {
-    // If no session manager is wired, skip gating
+  private async gatedRestart(newVersion: string): Promise<void> {
+    // If no session manager is wired, skip gating — silent restart
     if (!this.sessionManager) {
-      await this.notify(
-        `Just updated to v${newVersion}. Restarting to pick up the changes.${summaryNote}`
-      );
+      console.log(`[AutoUpdater] Silent restart — no session manager wired (updating to v${newVersion})`);
       await new Promise(r => setTimeout(r, 2000));
       this.requestRestart(newVersion);
       return;
@@ -434,15 +427,16 @@ export class AutoUpdater {
       const hasRunningSessions = runningSessions.length > 0;
 
       if (result.reason?.includes('Max deferral')) {
+        // Forced restart after max deferral — user needs to know
         await this.notify(
-          `Update to v${newVersion} was deferred for active sessions, but the maximum wait has been reached. Restarting now.${summaryNote}`
+          `Update to v${newVersion} was deferred for active sessions, but the maximum wait has been reached. Restarting now.`
         );
       } else if (hasRunningSessions) {
-        // Sessions exist but aren't blocking — send pre-restart notification
+        // Sessions exist but aren't blocking — user needs a heads-up
         const delaySecs = this.config.preRestartDelaySecs;
         await this.notify(
           `Just updated to v${newVersion}. Server restarting in ${delaySecs} seconds. ` +
-          `${runningSessions.length} session(s) will resume after restart.${summaryNote}`
+          `${runningSessions.length} session(s) will resume after restart.`
         );
         // Give sessions a moment to checkpoint
         if (delaySecs > 0) {
@@ -450,9 +444,9 @@ export class AutoUpdater {
           await new Promise(r => setTimeout(r, delaySecs * 1000));
         }
       } else {
-        await this.notify(
-          `Just updated to v${newVersion}. Restarting to pick up the changes.${summaryNote}`
-        );
+        // No active sessions — silent restart. Don't notify the user.
+        // Updates should be invisible when nobody's working.
+        console.log(`[AutoUpdater] Silent restart — no active sessions (updating to v${newVersion})`);
       }
       await new Promise(r => setTimeout(r, 2000));
       this.requestRestart(newVersion);
@@ -480,7 +474,7 @@ export class AutoUpdater {
     }
     this.deferralTimer = setTimeout(async () => {
       this.deferralTimer = null;
-      await this.gatedRestart(newVersion, summaryNote);
+      await this.gatedRestart(newVersion);
     }, result.retryInMs ?? 300_000);
     this.deferralTimer.unref();
   }
@@ -555,30 +549,6 @@ export class AutoUpdater {
     return this.state.get<number>('agent-updates-topic')
       || this.state.get<number>('agent-attention-topic')
       || 0;
-  }
-
-  // ── Upgrade guide detection ─────────────────────────────────────────
-
-  /**
-   * Check if an upgrade guide exists for the given version.
-   * This is used to decide whether to promise a "what's new" summary
-   * in the post-update notification — we should only make a promise
-   * we can keep.
-   */
-  private hasUpgradeGuide(version: string): boolean {
-    try {
-      // This file is at dist/core/AutoUpdater.js after compilation.
-      // The upgrades/ dir is at the package root (3 levels up).
-      const moduleDir = path.resolve(
-        new URL(import.meta.url).pathname,
-        '..', '..', '..'
-      );
-      const guidePath = path.join(moduleDir, 'upgrades', `${version}.md`);
-      return fs.existsSync(guidePath);
-    } catch {
-      // @silent-fallback-ok — logging should never break gate
-      return false;
-    }
   }
 
   // ── State persistence ──────────────────────────────────────────────

@@ -270,7 +270,7 @@ describe('AutoUpdater — failure paths', () => {
       expect(status.lastError).toBeNull();
     });
 
-    it('falls back to console log when Telegram unavailable', async () => {
+    it('performs silent restart when Telegram unavailable and no sessions', async () => {
       const consoleSpy = vi.spyOn(console, 'log');
 
       const updater = new AutoUpdater(
@@ -283,9 +283,9 @@ describe('AutoUpdater — failure paths', () => {
 
       await (updater as any).tick();
 
-      // Notification fell back to console
+      // Silent restart — no Telegram notification, just console log
       const logCalls = consoleSpy.mock.calls.map(c => c.join(' '));
-      expect(logCalls.some(msg => msg.includes('Notification:'))).toBe(true);
+      expect(logCalls.some(msg => msg.includes('Silent restart'))).toBe(true);
     });
   });
 

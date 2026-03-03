@@ -2362,95 +2362,24 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.error(`  Auto-start check failed: ${err instanceof Error ? err.message : err}`);
     }
 
-    // Spawn a short session to process any pending upgrade guide and message the user.
-    // This fires after full server initialization — sessionManager, telegram, everything is ready.
-    // The guide was written by `instar migrate` (during auto-update) or by the startup migration above.
+    // Upgrade guide delivery — silent approach.
+    // The pending guide file is preserved at .instar/state/pending-upgrade-guide.md
+    // and gets injected into the agent's context at the NEXT natural session start
+    // (via ContextHierarchy). No dedicated notification session is spawned.
     //
-    // Uses UpgradeNotifyManager for verified delivery with model escalation:
-    //   1. Try with haiku (fast, cheap)
-    //   2. If guide wasn't acknowledged, retry with sonnet (more capable)
-    //   3. If all attempts fail, preserve guide for next session-start
+    // Previous approach spawned a Claude session (haiku → sonnet escalation) that
+    // messaged the user via Telegram — too noisy. Updates should be invisible
+    // unless the user's active work is interrupted.
     try {
       const pendingGuidePath = path.join(config.stateDir, 'state', 'pending-upgrade-guide.md');
       if (fs.existsSync(pendingGuidePath)) {
         const guideContent = fs.readFileSync(pendingGuidePath, 'utf-8');
         if (guideContent.trim()) {
-          console.log(pc.green('  Pending upgrade guide detected — spawning session to notify user'));
-
-          // Brief delay so server is fully ready (scheduler, tunnel, etc.)
-          setTimeout(async () => {
-            try {
-              const { UpgradeNotifyManager } = await import('../core/UpgradeNotifyManager.js');
-
-              // Find the Telegram reply script for the prompt (may be in .claude/scripts or .instar/scripts)
-              const replyScriptClaude = path.join(config.projectDir, '.claude', 'scripts', 'telegram-reply.sh');
-              const replyScriptInstar = path.join(config.projectDir, '.instar', 'scripts', 'telegram-reply.sh');
-              const replyScript = fs.existsSync(replyScriptClaude) ? replyScriptClaude
-                : fs.existsSync(replyScriptInstar) ? replyScriptInstar : '';
-              // Route upgrade notifications to Updates topic (informational, not critical)
-              const notifyTopicId = state.get<number>('agent-updates-topic') || state.get<number>('agent-attention-topic') || 0;
-
-              const notifyManager = new UpgradeNotifyManager(
-                {
-                  pendingGuidePath,
-                  projectDir: config.projectDir,
-                  stateDir: config.stateDir,
-                  port: config.port,
-                  dashboardPin: config.dashboardPin || '',
-                  tunnelUrl: tunnel?.url || '',
-                  currentVersion: getInstalledVersion(),
-                  replyScript,
-                  notifyTopicId,
-                },
-                // SessionSpawner
-                (opts) => sessionManager.spawnSession(opts),
-                // SessionCompletionChecker
-                (sessionId) => {
-                  const session = state.getSession(sessionId);
-                  return !session || session.status === 'completed' || session.status === 'failed' || session.status === 'killed';
-                },
-                // ActivityLogger — writes to activity JSONL for observability
-                (event) => {
-                  try {
-                    const logDir = path.join(config.stateDir, 'logs');
-                    fs.mkdirSync(logDir, { recursive: true });
-                    const today = new Date().toISOString().slice(0, 10);
-                    const logFile = path.join(logDir, `activity-${today}.jsonl`);
-                    const entry = { ...event, timestamp: new Date().toISOString() };
-                    fs.appendFileSync(logFile, JSON.stringify(entry) + '\n');
-                  } catch { /* @silent-fallback-ok — activity log non-critical */ }
-                },
-              );
-
-              const result = await notifyManager.notify();
-              if (result.success) {
-                console.log(pc.green(`  Upgrade guide delivered (${result.model}, ${result.attempts} attempt${result.attempts !== 1 ? 's' : ''})`));
-              } else {
-                console.warn(pc.yellow(`  Upgrade guide delivery failed after ${result.attempts} attempts: ${result.error}`));
-                console.warn(pc.yellow('  Guide preserved — will be injected at next session-start'));
-              }
-            } catch (err) {
-              console.error(`[UpgradeGuide] Failed to spawn notification session: ${err instanceof Error ? err.message : err}`);
-              DegradationReporter.getInstance().report({
-                feature: 'server.deliverUpgradeGuide',
-                primary: 'Spawn session to deliver upgrade guide',
-                fallback: 'Guide not delivered',
-                reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
-                impact: 'User misses upgrade instructions',
-              });
-            }
-          }, 15_000); // 15 second delay — let everything settle
+          console.log(pc.green('  Pending upgrade guide detected — will be injected at next session start'));
         }
       }
-    } catch (err) {
-      // Non-critical — don't crash the server over upgrade guide processing
-      DegradationReporter.getInstance().report({
-        feature: 'server.upgradeGuideProcessing',
-        primary: 'Check for and process pending upgrade guide',
-        fallback: 'Upgrade guide check skipped entirely',
-        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
-        impact: 'Pending upgrade guide not detected — user may miss upgrade instructions until next restart',
-      });
+    } catch {
+      // @silent-fallback-ok — upgrade guide check non-critical
     }
 
     // Graceful shutdown
