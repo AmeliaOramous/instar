@@ -117,26 +117,37 @@ Present:
 
 ### Entry Point B: No Agent in CWD (existingAgentInCWD=false)
 
-Check `merged_agents` from discovery data. Present agents GROUPED by source:
+Check `merged_agents` from discovery data.
 
-If merged agents exist:
+**CRITICAL: Every agent in `merged_agents` MUST appear in the options.** Don't mention an agent in the summary text but leave it out of the options — that confuses users. The summary and options must be consistent.
 
-> I found existing agents:
->
-> **On this machine:**
->   1. my-agent (~/.instar/agents/my-agent) — running, backed up to owner/instar-my-agent
->
-> **Your repos:**
->   2. personal-bot (justinheadley/instar-personal-bot)
->
-> **SageMindAI:**
->   3. ai-guy (SageMindAI/instar-ai-guy)
->
->   4. **Start fresh** — set up a brand new agent
+**Local agents that are already running on this machine are informational only.** Don't offer them as options (there's nothing to set up — they're already running). But DO explain why they're not actionable so the user isn't confused:
 
-For agents that appear both locally and on GitHub (source='both'), show once under "On this machine" with backup note.
+If merged agents exist, present using `AskUserQuestion`. The options list should include:
+- One "Restore [name]" option for each GitHub-only agent (source='github')
+- One "Manage [name]" option for each local-only agent that might need reconfiguration
+- For agents that appear both locally and on GitHub (source='both'), show as "Manage [name]" with note about backup
+- "Start fresh" as the last option
 
-If user picks an existing agent → Go to [Restore Flow](#restore-flow)
+Example with both local and GitHub agents:
+
+> I found some existing agents.
+>
+> Already running on this machine:
+> - **ai-guy** (port 4040, 1 user) — already set up
+>
+> Available to restore from GitHub:
+> - **personal-bot** (you/instar-personal-bot)
+> - **work-agent** (SageMindAI/instar-work-agent)
+
+Then offer AskUserQuestion options:
+1. **Restore personal-bot** — Clone from GitHub and set it up here
+2. **Restore work-agent** — Clone from GitHub and set it up here
+3. **Start fresh** — Set up a brand new agent
+
+Only include "Manage [name]" for local agents if the user navigated here expecting to reconfigure one. For most flows, just noting they exist is sufficient — the user came here to set up something NEW.
+
+If user picks a restore option → Go to [Restore Flow](#restore-flow)
 If "Start fresh" → continue to fresh install.
 
 #### If gh_status="auth-needed"
