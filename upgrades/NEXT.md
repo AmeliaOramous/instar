@@ -1,21 +1,26 @@
-# Upgrade Guide — v0.12.1
+# Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
+<!-- Valid values: patch, minor, major -->
+<!-- patch = bug fixes, refactors, test additions, doc updates -->
+<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
+<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-Setup wizard Entry Point B (no agent in CWD) now has improved agent listing consistency:
-- Every discovered agent in `merged_agents` appears in the AskUserQuestion options
-- Local agents shown as informational with "already running" explanation
-- GitHub agents listed with "Restore X" options
-- Prevents confusion when agents appear in summary text but not in choices
+<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
+<!-- Write this for the AGENT — they need to understand the system deeply. -->
 
 ## What to Tell Your User
 
-- **Setup wizard polish**: "The setup screen now clearly shows which agents you can restore from GitHub and which are already running locally. No more confusing mentions of agents without actions."
+<!-- Write talking points the agent should relay to their user. -->
+<!-- This should be warm, conversational, user-facing — not a changelog. -->
+<!-- Focus on what THEY can now do, not internal plumbing. -->
+
+- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Improved wizard agent display | Automatic — just run `npx instar` |
+| [Capability] | [Endpoint, command, or "automatic"] |

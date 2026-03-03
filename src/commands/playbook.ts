@@ -233,6 +233,27 @@ function getPackageDir(): string {
   return dir;
 }
 
+// ── Playbook Environment ───────────────────────────────────────────
+
+/**
+ * Build the environment variables needed for playbook Python scripts.
+ *
+ * Sets PLAYBOOK_CONFIG so Python scripts can locate the playbook-config.json
+ * and resolve manifest/data paths correctly, regardless of cwd or script
+ * bundling location.
+ *
+ * Without this, Python scripts fall back to using their script directory's
+ * parent as playbook_root — pointing to the Instar package, not the agent's
+ * .instar/playbook directory.
+ */
+function makePlaybookEnv(stateDir: string): Record<string, string> {
+  const configPath = path.join(stateDir, 'playbook', 'playbook-config.json');
+  if (fs.existsSync(configPath)) {
+    return { PLAYBOOK_CONFIG: configPath };
+  }
+  return {};
+}
+
 // ── Python Execution ───────────────────────────────────────────────
 
 interface ExecResult {
@@ -613,7 +634,7 @@ export async function playbookStatus(opts: PlaybookOptions): Promise<void> {
   const args = ['status'];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -637,7 +658,7 @@ export async function playbookList(opts: PlaybookListOptions): Promise<void> {
   if (opts.type) args.push('--type', opts.type);
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -659,7 +680,7 @@ export async function playbookRead(itemId: string, opts: PlaybookOptions): Promi
   const args = ['read', itemId];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -703,7 +724,7 @@ export async function playbookAdd(opts: PlaybookAddOptions): Promise<void> {
   if (opts.category) args.push('--category', opts.category);
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode === 2) {
     console.error(pc.yellow('\n  Validation failed:'));
     console.error(pc.dim(`  ${result.stdout.trim()}\n`));
@@ -732,7 +753,7 @@ export async function playbookSearch(query: string, opts: PlaybookSearchOptions)
   if (opts.limit) args.push('--limit', String(opts.limit));
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -757,7 +778,7 @@ export async function playbookAssemble(opts: PlaybookAssembleOptions): Promise<v
   if (opts.triggers) args.push('--triggers', opts.triggers);
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -784,7 +805,7 @@ export async function playbookEvaluate(sessionLog: string, opts: PlaybookOptions
   }
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -804,7 +825,7 @@ export async function playbookLifecycle(opts: PlaybookLifecycleOptions): Promise
   if (opts.json) args.push('--json');
 
   console.log(pc.dim('\n  Running lifecycle pass...'));
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -828,7 +849,7 @@ export async function playbookValidate(opts: PlaybookOptions): Promise<void> {
   let schemaOk = true;
   try {
     const schemaScript = resolveScript(stateDir, 'playbook-schema-validate.py');
-    const schemaResult = execPython(python.interpreter, schemaScript, [], opts);
+    const schemaResult = execPython(python.interpreter, schemaScript, [], opts, makePlaybookEnv(stateDir));
     if (schemaResult.exitCode === 0) {
       console.log(`  ${pc.green('✓')} Schema validation passed`);
     } else {
@@ -846,7 +867,7 @@ export async function playbookValidate(opts: PlaybookOptions): Promise<void> {
   let integrityOk = true;
   try {
     const verifyScript = resolveScript(stateDir, 'playbook-verify.py');
-    const verifyResult = execPython(python.interpreter, verifyScript, [], opts);
+    const verifyResult = execPython(python.interpreter, verifyScript, [], opts, makePlaybookEnv(stateDir));
     if (verifyResult.exitCode === 0) {
       console.log(`  ${pc.green('✓')} Chain integrity passed`);
     } else {
@@ -886,7 +907,7 @@ export async function playbookMount(mountPath: string, opts: PlaybookMountOption
   const args = ['mount', path.resolve(mountPath), '--name', opts.name];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     if (result.stdout.trim()) {
       if (opts.json) {
@@ -915,7 +936,7 @@ export async function playbookUnmount(name: string, opts: PlaybookOptions): Prom
   const args = ['unmount', name];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     if (result.stdout.trim()) {
       console.error(pc.red(`\n  ${result.stdout.trim()}\n`));
@@ -986,7 +1007,7 @@ export async function playbookImport(filePath: string, opts: PlaybookOptions): P
   if (opts.json) args.push('--json');
 
   console.log(pc.dim(`\n  Importing from ${absPath}...`));
-  const result = execPython(python.interpreter, validatorScript, args, opts);
+  const result = execPython(python.interpreter, validatorScript, args, opts, makePlaybookEnv(stateDir));
 
   if (result.exitCode === 2) {
     console.error(pc.yellow('\n  Some items failed validation:'));
@@ -1059,7 +1080,7 @@ export async function playbookUserExport(userId: string, opts: PlaybookOptions):
   const args = ['user-export', userId];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
@@ -1082,7 +1103,7 @@ export async function playbookUserDelete(userId: string, opts: PlaybookUserOptio
   if (opts.confirm) args.push('--confirm');
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     if (result.stdout.trim()) {
       console.error(pc.red(`\n  ${result.stdout.trim()}\n`));
@@ -1107,7 +1128,7 @@ export async function playbookUserAudit(userId: string, opts: PlaybookOptions): 
   const args = ['user-audit', userId];
   if (opts.json) args.push('--json');
 
-  const result = execPython(python.interpreter, script, args, opts);
+  const result = execPython(python.interpreter, script, args, opts, makePlaybookEnv(stateDir));
   if (result.exitCode !== 0) {
     handleExitCode(result.exitCode, result.stdout, opts);
     return;
