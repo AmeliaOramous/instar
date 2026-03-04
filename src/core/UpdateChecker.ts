@@ -45,6 +45,12 @@ export class UpdateChecker {
   private stateFile: string;
   private rollbackFile: string;
   private migratorConfig: MigratorConfig | null;
+  /** Cached version from first read — represents the RUNNING process version,
+   *  not the potentially-updated-on-disk version. This is critical: after
+   *  `npm install -g` replaces files in-place, reading package.json from disk
+   *  returns the NEW version, but the running process still has OLD code in memory.
+   *  Caching prevents false "already up to date" results. */
+  private cachedInstalledVersion: string | null = null;
 
   constructor(config: string | UpdateCheckerConfig) {
     // Backwards-compatible: accept plain string (stateDir) or config object
@@ -120,15 +126,24 @@ export class UpdateChecker {
   async applyUpdate(): Promise<UpdateResult> {
     const previousVersion = this.getInstalledVersion();
 
-    // Check if there's actually an update available
+    // Check what the registry has. Note: even if getInstalledVersion() returns
+    // the latest (e.g., after a previous npm install -g updated files in place),
+    // we still need to install+restart since the running process has old code.
+    // The caller (AutoUpdater) is responsible for loop prevention.
     const info = await this.check();
     if (!info.updateAvailable) {
+      // Files on disk match the registry — but running code may be stale.
+      // Return success with restartNeeded based on whether the process version
+      // (captured at the start of this call) differs from what's on disk now.
+      const needsRestart = previousVersion !== info.latestVersion;
       return {
         success: true,
         previousVersion,
-        newVersion: previousVersion,
-        message: `Already up to date (v${previousVersion}).`,
-        restartNeeded: false,
+        newVersion: info.latestVersion,
+        message: needsRestart
+          ? `Files already at v${info.latestVersion} (running v${previousVersion}). Restart needed.`
+          : `Already up to date (v${previousVersion}).`,
+        restartNeeded: needsRestart,
         healthCheck: 'skipped',
       };
     }
@@ -445,8 +460,19 @@ export class UpdateChecker {
 
   /**
    * Get the currently installed version from package.json.
+   *
+   * IMPORTANT: Returns the version that was on disk when first called (cached).
+   * This represents the RUNNING process version. After `npm install -g` updates
+   * files in-place, the disk version changes but the running code doesn't.
+   * Without caching, check() would see "no update available" after an install,
+   * causing applyUpdate() to return restartNeeded:false even though the running
+   * process needs a restart.
    */
   getInstalledVersion(): string {
+    if (this.cachedInstalledVersion !== null) {
+      return this.cachedInstalledVersion;
+    }
+
     try {
       // Try to find instar's package.json relative to this module
       const pkgPath = path.resolve(
@@ -455,11 +481,14 @@ export class UpdateChecker {
       );
       if (fs.existsSync(pkgPath)) {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-        return pkg.version || '0.0.0';
+        const version = pkg.version || '0.0.0';
+        this.cachedInstalledVersion = version;
+        return version;
       }
     } catch { /* @silent-fallback-ok — version read defaults to 0.0.0 */ }
 
-    return '0.0.0';
+    this.cachedInstalledVersion = '0.0.0';
+    return this.cachedInstalledVersion;
   }
 
   /**

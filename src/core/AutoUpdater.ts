@@ -403,20 +403,29 @@ export class AutoUpdater {
 
       // Update succeeded
       this.lastApply = new Date().toISOString();
-      this.lastAppliedVersion = result.newVersion;
+      // CRITICAL: Use targetVersion for the loop breaker, not result.newVersion.
+      // applyUpdate() may return newVersion=previousVersion when npm install -g
+      // updates files in-place (making getInstalledVersion() return the new version
+      // before the verification step). Using targetVersion ensures the loop breaker
+      // always matches and prevents the update→apply→notify→restart spam loop.
+      this.lastAppliedVersion = targetVersion;
       this.pendingUpdate = null;
       this.pendingUpdateDetectedAt = null;
       this.coalescingUntil = null;
       this.saveState();
 
-      console.log(`[AutoUpdater] Updated: v${result.previousVersion} → v${result.newVersion}`);
+      console.log(`[AutoUpdater] Updated: v${result.previousVersion} → v${result.newVersion} (target: v${targetVersion})`);
 
-      if (result.restartNeeded) {
-        await this.gatedRestart(result.newVersion!);
-      } else {
-        // No restart needed — silent update. Don't notify the user.
-        console.log(`[AutoUpdater] Update applied (no restart needed): v${result.newVersion}`);
-      }
+      // Always restart after a successful apply. The running process has OLD
+      // code in memory regardless of what getInstalledVersion() reads from disk.
+      // Even when applyUpdate() returns restartNeeded:false (because npm install -g
+      // updated files in-place making getInstalledVersion() return the new version),
+      // the in-memory code is stale and needs a restart.
+      //
+      // The loop breaker in tick() (checking lastAppliedVersion === latestVersion)
+      // prevents this from becoming an infinite loop. After restart, the loop
+      // breaker catches the next cycle and returns early.
+      await this.gatedRestart(targetVersion);
     } catch (err) {
       this.isApplying = false;
       this.lastError = err instanceof Error ? err.message : String(err);
