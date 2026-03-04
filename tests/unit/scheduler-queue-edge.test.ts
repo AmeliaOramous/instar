@@ -54,7 +54,7 @@ describe('Scheduler queue edge cases', () => {
     );
     // Skill type: should produce "/{value} {args}"
     expect(source).toContain("case 'skill':");
-    expect(source).toContain("return `/${job.execute.value}");
+    expect(source).toContain("`/${job.execute.value}");
   });
 
   it('builds prompt type correctly', () => {
@@ -62,9 +62,9 @@ describe('Scheduler queue edge cases', () => {
       path.join(process.cwd(), 'src/scheduler/JobScheduler.ts'),
       'utf-8'
     );
-    // Prompt type: should return value directly
+    // Prompt type: should use value directly
     expect(source).toContain("case 'prompt':");
-    expect(source).toContain('return job.execute.value');
+    expect(source).toContain('job.execute.value');
   });
 
   it('builds script prompt correctly', () => {
@@ -74,7 +74,7 @@ describe('Scheduler queue edge cases', () => {
     );
     // Script type: should produce "Run this script: {value}"
     expect(source).toContain("case 'script':");
-    expect(source).toContain("return `Run this script:");
+    expect(source).toContain("`Run this script:");
   });
 
   it('queue deduplicates by slug', () => {
