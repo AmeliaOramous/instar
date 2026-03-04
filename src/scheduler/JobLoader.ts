@@ -132,6 +132,13 @@ export function validateJob(job: unknown, index?: number): void {
     throw new Error(`${prefix}: "gate" must be a string (shell command) if provided, got ${typeof j.gate}`);
   }
 
+  // telegramNotify — boolean or 'on-alert'
+  if (j.telegramNotify !== undefined) {
+    if (typeof j.telegramNotify !== 'boolean' && j.telegramNotify !== 'on-alert') {
+      throw new Error(`${prefix}: "telegramNotify" must be true, false, or "on-alert" if provided, got "${j.telegramNotify}"`);
+    }
+  }
+
   // Grounding config — validate structure if present
   if (j.grounding !== undefined) {
     validateGrounding(j.grounding, prefix);

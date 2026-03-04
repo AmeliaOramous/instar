@@ -438,14 +438,50 @@ export class JobScheduler {
   }
 
   private buildPrompt(job: JobDefinition): string {
+    let base: string;
     switch (job.execute.type) {
       case 'skill':
-        return `/${job.execute.value}${job.execute.args ? ' ' + job.execute.args : ''}`;
+        base = `/${job.execute.value}${job.execute.args ? ' ' + job.execute.args : ''}`;
+        break;
       case 'prompt':
-        return job.execute.value;
+        base = job.execute.value;
+        break;
       case 'script':
-        return `Run this script: ${job.execute.value}${job.execute.args ? ' ' + job.execute.args : ''}`;
+        base = `Run this script: ${job.execute.value}${job.execute.args ? ' ' + job.execute.args : ''}`;
+        break;
     }
+
+    // Inject attention protocol for on-alert jobs so the LLM knows when to signal
+    if (this.getNotifyMode(job) === 'on-alert') {
+      const protocol = [
+        '[NOTIFICATION PROTOCOL: This job runs in quiet mode.',
+        'The user will NOT see your output unless you explicitly signal something needs attention.',
+        'If you find something actionable or noteworthy, include "[ATTENTION] reason" on its own line in your output.',
+        'If everything is routine and healthy, just complete normally — no signal needed, the user won\'t be bothered.]',
+      ].join(' ');
+      return `${protocol}\n\n${base}`;
+    }
+
+    return base;
+  }
+
+  /**
+   * Resolve the effective notification mode for a job.
+   * Default (undefined) → 'on-alert': quiet unless signaled.
+   */
+  private getNotifyMode(job: JobDefinition): 'always' | 'never' | 'on-alert' {
+    if (job.telegramNotify === false) return 'never';
+    if (job.telegramNotify === true) return 'always';
+    // undefined or 'on-alert' → on-alert (quiet by default)
+    return 'on-alert';
+  }
+
+  /**
+   * Check if session output contains an attention signal.
+   * The convention: [ATTENTION] on its own line (case-insensitive).
+   */
+  private hasAttentionSignal(output: string): boolean {
+    return /^\[ATTENTION\]/im.test(output);
   }
 
   private getConsecutiveFailures(slug: string): number {
@@ -506,7 +542,8 @@ export class JobScheduler {
 
     // Skip notifications if no messaging configured or job opted out
     if (!this.messenger && !this.telegram) return;
-    if (job.telegramNotify === false) return;
+    const notifyMode = this.getNotifyMode(job);
+    if (notifyMode === 'never') return;
 
     // Capture the last output from the tmux session
     let output = '';
@@ -569,6 +606,28 @@ export class JobScheduler {
       return;
     }
 
+    // On-alert mode: only notify if the job failed or explicitly signaled attention.
+    // This is the core of the "quiet by default" behavior — routine completions are silent.
+    if (notifyMode === 'on-alert' && !failed && !this.hasAttentionSignal(output)) {
+      console.log(`[scheduler] Skipping notification for ${job.slug} — on-alert mode, no attention signal`);
+      return;
+    }
+
+    // Lazy topic creation for on-alert jobs that need to send their first notification.
+    // Topics aren't created eagerly for these jobs — only when there's something to report.
+    if (this.telegram && !job.topicId && notifyMode === 'on-alert') {
+      try {
+        const topic = await this.telegram.findOrCreateForumTopic(
+          `${TOPIC_STYLE.JOB.emoji} Job: ${job.name}`,
+          TOPIC_STYLE.JOB.color,
+        );
+        job.topicId = topic.topicId;
+        this.saveJobTopicMapping(job.slug, topic.topicId);
+      } catch (err) {
+        console.error(`[scheduler] Failed to create lazy topic for ${job.slug}: ${err}`);
+      }
+    }
+
     // Send to the job's dedicated topic if available, otherwise fall back to generic messenger
     if (this.telegram && job.topicId) {
       try {
@@ -612,8 +671,10 @@ export class JobScheduler {
     const mappings = this.state.get<Record<string, number>>('job-topic-mappings') ?? {};
 
     for (const job of enabledJobs) {
-      // Opt-out: skip topic creation entirely when telegramNotify is explicitly false
-      if (job.telegramNotify === false) continue;
+      // Skip eager topic creation for silent or on-alert jobs.
+      // On-alert jobs get topics created lazily when they first have something to report.
+      const mode = this.getNotifyMode(job);
+      if (mode === 'never' || mode === 'on-alert') continue;
 
       // If job already has a topicId (from jobs.json or previous mapping), use it
       if (job.topicId) {

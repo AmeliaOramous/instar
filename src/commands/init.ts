@@ -747,7 +747,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
       maxSessions: 3,
       protectedSessions: [`${agentName}-server`],
     },
-    scheduler: { enabled: false, maxParallelJobs: 2 },
+    scheduler: { enabled: true, maxParallelJobs: 2 },
     messaging: [],
     monitoring: {
       quotaTracking: true,

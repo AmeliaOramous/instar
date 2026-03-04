@@ -76,10 +76,13 @@ export interface JobDefinition {
   tags?: string[];
   /** Telegram topic ID this job reports to (auto-created if not set) */
   topicId?: number;
-  /** Set to false to disable all Telegram notifications for this job.
-   *  Also prevents topic creation in ensureJobTopics.
-   *  Useful for low-signal jobs that report via other channels. */
-  telegramNotify?: boolean;
+  /** Controls when this job sends Telegram notifications.
+   *  - true: always notify on completion (legacy behavior)
+   *  - false: never notify (no topic created)
+   *  - 'on-alert': only notify on failure or when session signals [ATTENTION] (DEFAULT)
+   *  When undefined, defaults to 'on-alert' — jobs are quiet unless they have
+   *  something that needs the user's attention. */
+  telegramNotify?: boolean | 'on-alert';
   /** Grounding configuration — what context this job needs at session start */
   grounding?: JobGrounding;
   /** LLM supervision tier — see docs/LLM-SUPERVISED-EXECUTION.md */

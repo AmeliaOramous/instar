@@ -817,7 +817,7 @@ export async function runNonInteractiveSetup(opts: NonInteractiveOptions): Promi
       protectedSessions: [`${agentName}-server`],
       completionPatterns: ['has been automatically paused', 'Session ended', 'Interrupted by user'],
     },
-    scheduler: { jobsFile: path.join(stateDir, 'jobs.json'), enabled: false, maxParallelJobs: 1 },
+    scheduler: { jobsFile: path.join(stateDir, 'jobs.json'), enabled: true, maxParallelJobs: 1 },
     users: [],
     messaging: [] as Record<string, unknown>[],
     monitoring: { quotaTracking: false, memoryMonitoring: true, healthCheckIntervalMs: 30000 },

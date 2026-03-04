@@ -1,8 +1,8 @@
 {
   "$schema": "./builtin-manifest.schema.json",
   "schemaVersion": 1,
-  "generatedAt": "2026-03-03T17:53:43.570Z",
-  "instarVersion": "0.12.2",
+  "generatedAt": "2026-03-04T00:07:46.970Z",
+  "instarVersion": "0.12.7",
   "entryCount": 165,
   "entries": {
     "hook:session-start": {
@@ -295,7 +295,7 @@
       "type": "skill",
       "domain": "skills",
       "sourcePath": ".claude/skills/setup-wizard/skill.md",
-      "contentHash": "6e25fc09756c528ab6e7d7303362221b7b9f281eb1bc07265053e492afb77eb4",
+      "contentHash": "3a6c862351f559993cac82ec6da668a2118ea5737c1f92b9f4019beb5398f564",
       "since": "2025-01-01"
     },
     "route-group:health": {
@@ -1247,7 +1247,7 @@
       "type": "subsystem",
       "domain": "updates",
       "sourcePath": "src/core/AutoUpdater.ts",
-      "contentHash": "23d96ae82fa35160078dfa2248f638f23a748de2cfee61afed0d53ece02335fd",
+      "contentHash": "6e21af96fefe1aea6b743d533d6c915dbe3f9b12eb1ad43f6d94b90e796b76a7",
       "since": "2025-01-01"
     },
     "subsystem:auto-dispatcher": {
@@ -1271,7 +1271,7 @@
       "type": "subsystem",
       "domain": "scheduling",
       "sourcePath": "src/scheduler/JobScheduler.ts",
-      "contentHash": "8a7a17c68fd742aa334d204fcf60c26e5ff369e6322648552168d7bdca415849",
+      "contentHash": "210eac7fe6a313374fb70a8b899327b1d8d21560f4467768540bc5963d4ac5f6",
       "since": "2025-01-01"
     },
     "subsystem:project-mapper": {
@@ -1295,7 +1295,7 @@
       "type": "subsystem",
       "domain": "communication",
       "sourcePath": "src/lifeline/TelegramLifeline.ts",
-      "contentHash": "f10e67ed412cacee39b23d4447ff0441f8dd667ed4830d9de60771663e63bdad",
+      "contentHash": "58aa0f0b408b7155de5169890e1ad8e5edb87d20d628d85f09af3759392379b4",
       "since": "2025-01-01"
     },
     "subsystem:orphan-process-reaper": {

@@ -15,6 +15,7 @@
  * binary resolution failures, restart loops).
  */
 
+import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -31,6 +32,8 @@ export interface SupervisorEvents {
   serverDown: [reason: string];
   serverRestarting: [attempt: number];
   circuitBroken: [totalFailures: number, lastCrashOutput: string];
+  debugRestartRequested: [request: { fixDescription: string; requestedBy: string }];
+  debugRestartSkipped: [info: { fixDescription: string; reason: string }];
 }
 
 export class ServerSupervisor extends EventEmitter {
@@ -68,6 +71,7 @@ export class ServerSupervisor extends EventEmitter {
   private readonly circuitBreakerRetryIntervalMs = 30 * 60_000; // 30 min between retries
   private readonly maxCircuitBreakerRetries = 3; // Try 3 times before truly giving up
   private lastCrashOutput = ''; // Last captured crash output for diagnostics
+  private doctorSessionSecret: string | null = null; // HMAC secret for doctor restart requests
 
   constructor(options: {
     projectDir: string;
@@ -201,6 +205,14 @@ export class ServerSupervisor extends EventEmitter {
     this.restartAttempts = 0;
     this.maxRetriesExhaustedAt = 0;
     console.log('[Supervisor] Circuit breaker reset');
+  }
+
+  /**
+   * Set the HMAC secret for validating doctor session restart requests.
+   * Called by TelegramLifeline when a doctor session is spawned.
+   */
+  setDoctorSessionSecret(secret: string): void {
+    this.doctorSessionSecret = secret;
   }
 
   /**
@@ -340,6 +352,8 @@ export class ServerSupervisor extends EventEmitter {
 
       // Check for restart requests from the server (e.g., auto-updater)
       this.checkRestartRequest();
+      // Check for debug restart requests from doctor sessions
+      this.checkDebugRestartRequest();
     }, 10_000); // Check every 10 seconds
   }
 
@@ -411,6 +425,85 @@ export class ServerSupervisor extends EventEmitter {
     } catch {
       // Malformed flag — clean up
       try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+    }
+  }
+
+  // ── Debug restart request handling (doctor session) ─────────────
+
+  /**
+   * Check if a doctor session has requested a restart via HMAC-signed file.
+   * Called during the health check loop alongside checkRestartRequest().
+   */
+  private checkDebugRestartRequest(): void {
+    if (!this.stateDir) return;
+    const requestPath = path.join(this.stateDir, 'debug-restart-request.json');
+
+    try {
+      if (!fs.existsSync(requestPath)) return;
+
+      const raw = fs.readFileSync(requestPath, 'utf-8');
+      fs.unlinkSync(requestPath); // consume the request immediately
+
+      const request = JSON.parse(raw);
+
+      // TTL check — reject requests older than 30 minutes
+      const requestAge = Date.now() - new Date(request.requestedAt).getTime();
+      if (requestAge > 30 * 60_000) {
+        console.log(`[Supervisor] Stale debug restart request (${Math.round(requestAge / 60_000)}m old) — discarded`);
+        return;
+      }
+
+      // HMAC validation
+      if (!this.validateRestartHmac(request)) {
+        console.warn(`[Supervisor] Invalid HMAC on debug restart request — rejected`);
+        return;
+      }
+
+      // Sanitize fixDescription before display (self-reported, untrusted)
+      const safeDescription = (request.fixDescription || 'no description')
+        .replace(/[<>&"']/g, '') // strip HTML-like chars
+        .slice(0, 200); // cap length
+
+      console.log(`[Supervisor] Debug session fix (self-reported): ${safeDescription}`);
+
+      // Check if server already recovered
+      if (this.healthy) {
+        console.log(`[Supervisor] Server already healthy — skipping restart, noting fix`);
+        this.emit('debugRestartSkipped', { fixDescription: safeDescription, reason: 'server_already_healthy' });
+        return;
+      }
+
+      this.emit('debugRestartRequested', { fixDescription: safeDescription, requestedBy: request.requestedBy || 'doctor-session' });
+
+      // Reset circuit breaker and restart
+      this.resetCircuitBreaker();
+      this.stop().then(() => this.start());
+    } catch (err) {
+      console.error(`[Supervisor] Error processing debug restart request: ${err}`);
+    }
+  }
+
+  /**
+   * Validate HMAC on a debug restart request using the doctor session secret.
+   */
+  private validateRestartHmac(request: { requestedAt?: string; fixDescription?: string; hmac?: string }): boolean {
+    if (!this.doctorSessionSecret || !request.hmac || !request.requestedAt) return false;
+
+    try {
+      const expectedPayload = request.requestedAt + (request.fixDescription || '');
+      const expectedHmac = crypto
+        .createHmac('sha256', this.doctorSessionSecret)
+        .update(expectedPayload)
+        .digest('hex');
+
+      // Use timing-safe comparison to prevent timing attacks
+      const hmacBuf = Buffer.from(request.hmac, 'hex');
+      const expectedBuf = Buffer.from(expectedHmac, 'hex');
+
+      if (hmacBuf.length !== expectedBuf.length) return false;
+      return crypto.timingSafeEqual(hmacBuf, expectedBuf);
+    } catch {
+      return false;
     }
   }
 

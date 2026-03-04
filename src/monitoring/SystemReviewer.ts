@@ -198,7 +198,12 @@ export class SystemReviewer extends EventEmitter {
 
   constructor(config: Partial<SystemReviewerConfig>, deps: SystemReviewerDeps) {
     super();
-    this.config = { ...DEFAULT_SYSTEM_REVIEWER_CONFIG, ...config };
+    // Strip undefined values so DEFAULT_SYSTEM_REVIEWER_CONFIG defaults are preserved.
+    // Spreading { disabledProbes: undefined } would override the default [] causing TypeError.
+    const cleanConfig = Object.fromEntries(
+      Object.entries(config).filter(([, v]) => v !== undefined),
+    ) as Partial<SystemReviewerConfig>;
+    this.config = { ...DEFAULT_SYSTEM_REVIEWER_CONFIG, ...cleanConfig };
     this.deps = deps;
     this.historyFile = path.join(deps.stateDir, 'review-history.jsonl');
     this.deadLetterFile = path.join(deps.stateDir, 'doctor-dead-letter.jsonl');
