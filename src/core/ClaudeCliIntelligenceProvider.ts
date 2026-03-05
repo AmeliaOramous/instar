@@ -29,7 +29,6 @@ export class ClaudeCliIntelligenceProvider implements IntelligenceProvider {
 
   async evaluate(prompt: string, options?: IntelligenceOptions): Promise<string> {
     const model = resolveCliFlag(options?.model ?? DEFAULT_MODEL);
-    const maxTokens = options?.maxTokens ?? 100;
 
     return new Promise((resolve, reject) => {
       const args = [
@@ -38,10 +37,6 @@ export class ClaudeCliIntelligenceProvider implements IntelligenceProvider {
         '--max-turns', '1',
         '--output-format', 'text',
       ];
-
-      if (maxTokens) {
-        args.push('--max-tokens', String(maxTokens));
-      }
 
       const child = execFile(this.claudePath, args, {
         timeout: DEFAULT_TIMEOUT_MS,
