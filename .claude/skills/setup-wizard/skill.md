@@ -1224,7 +1224,7 @@ Present:
 
 Collect their phone number (plain text, NOT AskUserQuestion). Format it with country code (+1XXXXXXXXXX).
 
-Write the config:
+Write the config with QR auth method (NOT pairing-code — QR is used for browser-automated pairing):
 ```bash
 node -e "
 const fs = require('fs');
@@ -1236,6 +1236,7 @@ c.messaging.push({
   enabled: true,
   config: {
     backend: 'baileys',
+    authMethod: 'qr',
     authorizedNumbers: ['<PHONE_NUMBER>'],
     requireConsent: false
   }
@@ -1244,11 +1245,146 @@ fs.writeFileSync(p, JSON.stringify(c, null, 2));
 "
 ```
 
-Then tell the user:
+#### Step 4g-1b: Automated WhatsApp Pairing (Baileys)
 
-> WhatsApp is configured. When you start your agent, it will show a pairing code in the logs. Open WhatsApp on your phone → Settings → Linked Devices → Link a Device, and enter the code.
+**The user should NOT have to run any commands, read logs, or touch tmux.** The wizard handles pairing end-to-end, just like Telegram setup.
+
+**Step 1: Start the server (if not already running)**
+
+The agent server must be running for WhatsApp to connect. Start it in the background:
+
+```bash
+cd <project_dir> && npx instar server start &
+sleep 5  # Wait for server to initialize and WhatsApp adapter to start
+```
+
+Verify the server is running:
+```bash
+curl -s http://localhost:<PORT>/health | jq .status
+```
+
+**Step 2: Check WhatsApp connection status**
+
+```bash
+curl -s http://localhost:<PORT>/whatsapp/status
+```
+
+If already connected (unlikely on first setup), skip to the end.
+
+**Step 3: Browser-automated QR pairing**
+
+Use the same browser automation strategy as Telegram (Step 3a detection waterfall: Playwright → Chrome extension → Manual fallback).
+
+Tell the user:
+
+> I'm going to pair WhatsApp now. A QR code will appear — you'll scan it with your phone just like linking WhatsApp Web.
 >
-> You can also pair later with: `instar whatsapp connect`
+> Ready? Say OK and I'll start.
+
+**Wait for confirmation.**
+
+**Option A: Dashboard QR (preferred — no external browser needed)**
+
+The agent's dashboard serves the QR code at `GET /whatsapp/qr`. Open this in the browser:
+
+**If using Playwright:**
+```
+mcp__playwright__browser_navigate({ url: "http://localhost:<PORT>/dashboard" })
+```
+
+**If using Chrome extension:**
+```
+mcp__claude-in-chrome__navigate({ url: "http://localhost:<PORT>/dashboard", tabId: <tab_id> })
+```
+
+Navigate to the WhatsApp section of the dashboard. The QR code should be visible.
+
+Tell the user:
+
+> A QR code should be visible in the browser window. On your phone:
+> 1. Open WhatsApp
+> 2. Go to **Settings → Linked Devices → Link a Device**
+> 3. Scan the QR code in the browser
+
+**Option B: WhatsApp Web direct (fallback if dashboard QR isn't rendering)**
+
+Navigate to `https://web.whatsapp.com` in the browser. The QR code there works the same way — scan it with WhatsApp on your phone.
+
+> If you don't see a QR code in the dashboard, I've opened WhatsApp Web instead. Scan the QR code there with your phone.
+
+**Note:** This approach requires the Baileys session to NOT be simultaneously connected. If the server's Baileys adapter already took the QR, WhatsApp Web won't show one. In that case, use the dashboard QR endpoint or the pairing code fallback.
+
+**Step 4: Wait for connection**
+
+Poll the WhatsApp status endpoint every 5 seconds (up to 2 minutes):
+
+```bash
+curl -s http://localhost:<PORT>/whatsapp/status
+```
+
+Look for `"connected": true` or similar success indicator. Take a page snapshot periodically to check if WhatsApp Web shows the chat list (indicating successful pairing).
+
+While waiting, tell the user:
+
+> Waiting for you to scan the QR code... Take your time.
+
+**Step 5: Confirm connection**
+
+Once connected:
+
+> WhatsApp is paired! Your agent can now send and receive messages through WhatsApp.
+
+If the QR times out (Baileys QR codes expire after ~20 seconds and refresh automatically), tell the user:
+
+> The QR code refreshed — that's normal. Just scan the new one.
+
+If pairing fails after 2 minutes of attempts:
+
+> Having trouble with the QR code? Let me try the pairing code method instead.
+
+Fall back to pairing code:
+
+```bash
+# Reconfigure to pairing-code method
+node -e "
+const fs = require('fs');
+const p = '<project_dir>/.instar/config.json';
+const c = JSON.parse(fs.readFileSync(p, 'utf-8'));
+const wa = c.messaging.find(m => m.type === 'whatsapp');
+if (wa) { wa.config.authMethod = 'pairing-code'; wa.config.pairingPhoneNumber = '<PHONE_NUMBER>'; }
+fs.writeFileSync(p, JSON.stringify(c, null, 2));
+"
+```
+
+Then restart the WhatsApp adapter (or the server) and read the pairing code from the logs:
+
+> I've switched to pairing code mode. An 8-digit code will appear shortly.
+>
+> On your phone: **WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead**
+>
+> Enter the code when I show it to you.
+
+Watch the server output for the pairing code and relay it to the user immediately.
+
+**Option C: Manual fallback (no browser tools available)**
+
+If neither Playwright nor Chrome extension is available:
+
+> I don't have browser automation tools right now, so I'll walk you through pairing manually. It's quick — about 30 seconds.
+
+Start the server, wait for the QR or pairing code in the server output, and relay the pairing code directly to the user:
+
+> Your pairing code is: **XXXX-XXXX**
+>
+> On your phone:
+> 1. Open WhatsApp
+> 2. Go to **Settings → Linked Devices → Link a Device**
+> 3. Tap **Link with phone number instead**
+> 4. Enter the code above
+
+Poll for connection and confirm when paired.
+
+**CRITICAL: The user should NEVER have to run `tmux attach`, `instar whatsapp connect`, or any CLI command.** The wizard handles everything. If something goes wrong, the wizard diagnoses and retries — it doesn't hand the user a command to run.
 
 **If they choose Business API:**
 
@@ -1442,11 +1578,21 @@ curl -s http://localhost:<port>/health
 
 If the health check fails, retry once. If still failing, tell the user what happened and suggest `instar server start` manually.
 
-### Step 5b: Agent Greets the User in the Lifeline Topic
+### Step 5a-2: WhatsApp Pairing (if WhatsApp configured and not yet paired)
+
+**If WhatsApp (Baileys) was configured, pair it NOW — before declaring setup complete.** Do NOT leave pairing as a post-setup task. The user should walk away from this wizard with a fully connected, working messaging channel.
+
+If WhatsApp pairing was already completed during Phase 4g (the wizard started the server early for pairing), skip this step.
+
+If the server was just started in Step 5a and WhatsApp isn't paired yet, run the browser-automated QR pairing flow from Phase 4g Step 4g-1b now. The server is running, so the QR endpoint is available.
+
+**The "All done!" message MUST NOT appear until WhatsApp is actually connected and the user has sent/received at least one test message.**
+
+### Step 5b: Agent Greets the User
 
 **If Telegram was configured, the new agent should reach out to the user in the Lifeline topic.** If WhatsApp was configured (without Telegram), send the greeting via WhatsApp instead. This is the magic moment — the agent comes alive.
 
-Send the greeting to the Lifeline topic (using the `message_thread_id` from Step 3e-vi):
+**If Telegram:** Send the greeting to the Lifeline topic (using the `message_thread_id` from Step 3e-vi):
 
 ```bash
 curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
@@ -1456,7 +1602,18 @@ curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
 
 If the Lifeline topic wasn't created (Step 3e-vi failed), fall back to General (omit `message_thread_id`).
 
-The greeting should be **in the agent's voice** AND explain how Telegram topics work. For example, if the agent is named "Scout" and is casual:
+**If WhatsApp (no Telegram):** Send the greeting via the WhatsApp API endpoint:
+
+```bash
+curl -s -X POST "http://localhost:<PORT>/whatsapp/send" \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <AUTH_TOKEN>' \
+  -d '{"to": "<USER_PHONE_NUMBER>", "message": "<GREETING>"}'
+```
+
+The greeting should be **in the agent's voice**. Adapt to the messaging platform:
+
+**Telegram example** (if the agent is named "Scout" and is casual):
 
 > Hey! I'm Scout, your new project agent. I'm up and running.
 >
@@ -1469,6 +1626,14 @@ The greeting should be **in the agent's voice** AND explain how Telegram topics 
 > - The Lifeline topic is always here for anything that doesn't fit elsewhere
 >
 > What should we work on first?
+
+**WhatsApp example** (same agent):
+
+> Hey! I'm Scout, your new project agent. I'm up and running.
+>
+> This is our direct line — just message me here anytime. I'll respond right away when I'm active, or pick it up when I wake up.
+>
+> You can ask me to work on code, check on the project, run tests, or just chat. What should we work on first?
 
 Adapt the tone and examples to the agent's personality and role. Keep it warm and practical.
 
