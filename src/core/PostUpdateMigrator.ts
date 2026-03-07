@@ -111,6 +111,13 @@ export class PostUpdateMigrator {
     }
 
     try {
+      fs.writeFileSync(path.join(instarHooksDir, 'telegram-topic-context.sh'), this.getTelegramTopicContextHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/telegram-topic-context.sh (per-message unanswered detection)');
+    } catch (err) {
+      result.errors.push(`telegram-topic-context.sh: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
       fs.writeFileSync(path.join(instarHooksDir, 'external-operation-gate.js'), this.getExternalOperationGateHook(), { mode: 0o755 });
       result.upgraded.push('hooks/instar/external-operation-gate.js (MCP tool safety gate)');
     } catch (err) {
@@ -685,6 +692,27 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       this.migrateSettingsHookPaths(hooks.SessionStart as unknown[], result);
     }
 
+    // Add UserPromptSubmit hook for Telegram topic context injection
+    if (!hooks.UserPromptSubmit) {
+      hooks.UserPromptSubmit = [];
+    }
+    const userPromptSubmit = hooks.UserPromptSubmit as Array<{ matcher?: string; hooks?: unknown[] }>;
+    const hasTelegramTopicContext = userPromptSubmit.some(e =>
+      (e.hooks as Array<{ command?: string }> | undefined)?.some(h => h.command?.includes('telegram-topic-context')),
+    );
+    if (!hasTelegramTopicContext) {
+      userPromptSubmit.push({
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'bash .instar/hooks/instar/telegram-topic-context.sh',
+          timeout: 5000,
+        }],
+      });
+      patched = true;
+      result.upgraded.push('.claude/settings.json: added UserPromptSubmit telegram-topic-context hook');
+    }
+
     // Add PreToolUse MCP matcher for external operation gate
     if (!hooks.PreToolUse) {
       hooks.PreToolUse = [];
@@ -881,7 +909,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
@@ -893,6 +921,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       case 'scope-coherence-checkpoint': return this.getScopeCoherenceCheckpointHook();
       case 'claim-intercept': return this.getClaimInterceptHook();
       case 'claim-intercept-response': return this.getClaimInterceptResponseHook();
+      case 'telegram-topic-context': return this.getTelegramTopicContextHook();
     }
   }
 
@@ -1408,6 +1437,124 @@ fi
     return script;
   }
 
+  private getTelegramTopicContextHook(): string {
+    return `#!/bin/bash
+# UserPromptSubmit Hook: Auto-inject Telegram topic history context.
+#
+# When a user prompt contains [telegram:N], this hook reads the recent
+# conversation history for that topic and injects it as context. Also
+# detects unanswered user messages and surfaces them with directives.
+#
+# This prevents the "what are we talking about?" failure after compaction
+# or session restart — where the agent receives a message without
+# conversation context and responds with a generic greeting.
+
+# Read the user prompt from stdin (Claude Code pipes JSON with { prompt: "..." })
+USER_PROMPT=\$(python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(data.get('prompt', ''))
+except:
+    print('')
+" 2>/dev/null)
+
+# Check for [telegram:N] prefix
+TOPIC_ID=\$(echo "\$USER_PROMPT" | python3 -c "
+import sys, re
+line = sys.stdin.read()
+m = re.search(r'\\\\[telegram:(\\\\d+)', line)
+if m:
+    print(m.group(1))
+" 2>/dev/null)
+
+if [ -z "\$TOPIC_ID" ]; then
+  exit 0
+fi
+
+# Get server port from config
+INSTAR_DIR="\${CLAUDE_PROJECT_DIR:-.}/.instar"
+CONFIG_FILE="\$INSTAR_DIR/config.json"
+
+if [ ! -f "\$CONFIG_FILE" ]; then
+  exit 0
+fi
+
+PORT=\$(grep -o '"port":[0-9]*' "\$CONFIG_FILE" | head -1 | cut -d':' -f2)
+if [ -z "\$PORT" ]; then
+  exit 0
+fi
+
+# Check server health
+HEALTH=\$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:\${PORT}/health" 2>/dev/null)
+if [ "\$HEALTH" != "200" ]; then
+  exit 0
+fi
+
+# Fetch recent messages for this topic
+AUTH_TOKEN=\$(python3 -c "import json; print(json.load(open('\$CONFIG_FILE')).get('authToken',''))" 2>/dev/null)
+if [ -n "\$AUTH_TOKEN" ]; then
+  RECENT_MSGS=\$(curl -s \\
+    -H "Authorization: Bearer \${AUTH_TOKEN}" \\
+    "http://localhost:\${PORT}/telegram/topics/\${TOPIC_ID}/messages?limit=15" 2>/dev/null)
+else
+  RECENT_MSGS=\$(curl -s \\
+    "http://localhost:\${PORT}/telegram/topics/\${TOPIC_ID}/messages?limit=15" 2>/dev/null)
+fi
+
+# Format and output context with unanswered message detection
+echo "\$RECENT_MSGS" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    msgs = data.get('messages', [])
+    if not msgs:
+        sys.exit(0)
+
+    print('TOPIC \${TOPIC_ID} RECENT HISTORY (auto-injected):')
+
+    for m in msgs:
+        ts = m.get('timestamp', '')[:16].replace('T', ' ')
+        from_user = m.get('fromUser', m.get('direction', 'in') == 'in')
+        text = m.get('text', '').strip()
+        sender = 'User' if from_user else 'Agent'
+        if len(text) > 300:
+            text = text[:297] + '...'
+        print(f'  [{ts}] {sender}: {text}')
+
+    # Detect unanswered user messages
+    pending_user = []
+    for m in msgs:
+        text = m.get('text', '').strip()
+        if not text:
+            continue
+        from_user = m.get('fromUser', m.get('direction', 'in') == 'in')
+        if from_user:
+            pending_user.append(m)
+        else:
+            pending_user = []
+
+    if pending_user:
+        print()
+        print('*** UNANSWERED MESSAGE(S) FROM USER ***')
+        for pm in pending_user:
+            pm_text = pm.get('text', '')[:200]
+            pm_ts = pm.get('timestamp', '')[:16].replace('T', ' ')
+            print(f'  [{pm_ts}] \\\\\\\"{pm_text}\\\\\\\"')
+        print()
+        print('You MUST address these messages substantively. Do NOT respond with just')
+        print('a greeting or generic reply. Read the conversation history above and')
+        print('respond to what the user actually said. If the current message is a')
+        print('follow-up like \\\\\\\"hello?\\\\\\\" or \\\\\\\"please respond\\\\\\\", address the EARLIER')
+        print('unanswered message — that is what the user is waiting for.')
+except Exception:
+    pass
+" 2>/dev/null
+
+exit 0
+`;
+  }
+
   private getCompactionRecovery(): string {
     return `#!/bin/bash
 # Compaction recovery — re-injects identity AND topic context when Claude's context compresses.
@@ -1456,13 +1603,41 @@ if [ -n "\$INSTAR_TELEGRAM_TOPIC" ]; then
         echo "\$TOPIC_CTX" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-for m in d.get('recentMessages', []):
+msgs = d.get('recentMessages', [])
+for m in msgs:
     sender = 'User' if m.get('fromUser') else 'Agent'
     ts = m.get('timestamp', '')[:16].replace('T', ' ')
     text = m.get('text', '')
     if len(text) > 500:
         text = text[:500] + '...'
     print(f'[{ts}] {sender}: {text}')
+
+# Detect unanswered user messages
+pending_user = []
+for m in msgs:
+    text = m.get('text', '').strip()
+    if not text:
+        continue
+    if m.get('fromUser'):
+        pending_user.append(m)
+    else:
+        pending_user = []
+
+if pending_user:
+    print()
+    print('!' * 60)
+    print('UNANSWERED MESSAGE(S) FROM USER:')
+    for pm in pending_user:
+        pm_text = pm.get('text', '')[:200]
+        pm_ts = pm.get('timestamp', '')[:16].replace('T', ' ')
+        print(f'  [{pm_ts}] \\\"{pm_text}\\\"')
+    print()
+    print('You MUST address these messages substantively. Do NOT respond')
+    print('with just a greeting or generic reply. If the latest message')
+    print('is a follow-up like \\\"hello?\\\" or \\\"please respond\\\", address')
+    print('the EARLIER unanswered message — that is what the user is')
+    print('waiting for.')
+    print('!' * 60)
 " 2>/dev/null
         echo ""
         echo "Search past conversations: curl http://localhost:\${PORT}/topic/search?topic=\${TOPIC_ID}&q=QUERY"
