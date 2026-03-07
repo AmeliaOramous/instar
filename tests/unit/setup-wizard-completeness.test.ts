@@ -122,7 +122,7 @@ describe('Setup Wizard Completeness', () => {
 
     it('server config phase exists and comes after Telegram', () => {
       const telegramIndex = skill.indexOf('Phase 3: Telegram');
-      const configIndex = skill.indexOf('Phase 4');
+      const configIndex = skill.indexOf('Phase 4:');
       expect(telegramIndex).toBeGreaterThan(-1);
       expect(configIndex).toBeGreaterThan(-1);
       expect(telegramIndex).toBeLessThan(configIndex);
