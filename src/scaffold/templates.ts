@@ -945,12 +945,13 @@ The agent automatically sends UX signals on message receive:
 
 For Baileys backend: \`GET /whatsapp/qr\` returns the current QR code for pairing. The dashboard polls this endpoint and renders the QR for remote phone scanning.
 
-### Cross-Platform Alerts
+### Cross-Platform Alerts and Message Bridge
 
 When both Telegram and WhatsApp are configured:
 - WhatsApp stalls and disconnects are automatically reported on Telegram
 - Attention items can be surfaced on WhatsApp with interactive buttons
 - Health endpoint includes WhatsApp status when authenticated
+- **Message Bridge**: messages from one platform are forwarded to the other with a \`[via WhatsApp]\` or \`[via Telegram]\` prefix. Link channels via the bridge registry or the \`/messaging/bridge\` API endpoint. Loop detection prevents infinite forwarding.
 `;
   }
 
