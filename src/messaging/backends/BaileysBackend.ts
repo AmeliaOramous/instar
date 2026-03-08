@@ -204,7 +204,7 @@ export class BaileysBackend {
               const stat = fs.statSync(credsPath);
               const ageMs = Date.now() - stat.mtimeMs;
               isStaleIncomplete = ageMs < 5 * 60 * 1000; // < 5 minutes old
-            } catch { /* no creds file = not stale */ }
+            } catch { /* @silent-fallback-ok — no creds file = not stale */ }
 
             if (isStaleIncomplete) {
               console.log('[baileys] 401 with recent credentials — likely incomplete pairing. Clearing auth state and retrying.');

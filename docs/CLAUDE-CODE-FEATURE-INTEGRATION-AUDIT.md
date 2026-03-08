@@ -334,42 +334,99 @@ SYNERGY IDENTIFIED — New hook events close Instar's major observability gaps: 
 
 ### 4. Auto-Memory (`/memory`)
 
-**Status:** PENDING
+**Status:** COMPATIBLE — COORDINATION NEEDED (NO CONFLICT)
 
 **What Anthropic shipped:**
 - Claude automatically saves useful context across sessions in auto-memory directory
+- Storage location: `~/.claude/projects/<encoded-project-path>/memory/MEMORY.md` (per-user, per-project)
+- Additional topic files can be created alongside MEMORY.md (e.g., `debugging.md`, `patterns.md`)
 - Shared across git worktrees of the same repo
 - Users can view/edit via `/memory` command
-- Persistent `.claude/` directory storage
+- First 200 lines of MEMORY.md are always loaded into conversation context
+- Claude decides autonomously what to save vs discard
 
-**Audit questions:**
-- Does this conflict with Instar's MEMORY.md generation?
-- Are we duplicating effort between auto-memory and our memory system?
-- Should Instar coordinate with auto-memory (read from it, write to it, or avoid stepping on it)?
-- How does auto-memory interact with our conversational memory and episodic memory systems?
-- Could auto-memory serve as a lightweight complement to our structured memory architecture?
+**Key architectural detail — TWO COMPLETELY DIFFERENT DIRECTORIES:**
+- Claude auto-memory: `~/.claude/projects/<encoded-path>/memory/MEMORY.md` — lives in the USER's home directory, NOT in the project
+- Instar MEMORY.md: `.instar/MEMORY.md` — lives in the PROJECT directory, checked into git (or gitignored per project)
 
-**Current Instar behavior:**
-- Generates MEMORY.md from accumulated session learnings
-- Has its own memory architecture (FTS5 + vector search, episodic, working memory)
-- MEMORY.md is written to `.claude/` project directory
+These are different files in different locations. They CANNOT collide at the filesystem level.
 
-**Integration opportunity:**
-- Coordinate rather than compete: different memory layers for different purposes
-- Auto-memory for session-level context; Instar memory for long-term structured knowledge
-- Ensure no file conflicts in `.claude/` directory
+**Current Instar memory architecture (code-traced):**
 
-**Investigation notes:**
-_(To be filled during audit)_
+Instar has a sophisticated multi-layer memory system:
+
+1. **`.instar/MEMORY.md`** — Agent's persistent learnings file. Written by the agent during sessions. Read by `compaction-recovery.sh` for context injection. Backed up by `BackupManager`. Now a "generated snapshot" (Phase 6) rather than source of truth.
+
+2. **SemanticMemory** (`src/memory/SemanticMemory.ts`, 42KB) — SQLite-backed knowledge graph with typed entities (fact, pattern, decision, preference, relationship). Confidence scoring, decay, domain grouping. The canonical store.
+
+3. **MemoryExporter** (`src/memory/MemoryExporter.ts`) — Generates `.instar/MEMORY.md` FROM SemanticMemory entities. Groups by domain, filters by confidence, sorts by relevance. MEMORY.md is now a rendered view, not the source.
+
+4. **MemoryMigrator** (`src/memory/MemoryMigrator.ts`) — Imports flat MEMORY.md back into SemanticMemory entities. The reverse path.
+
+5. **WorkingMemoryAssembler** (`src/memory/WorkingMemoryAssembler.ts`) — Assembles context for session injection via `/context/working-memory` endpoint.
+
+6. **EpisodicMemory** (`src/memory/EpisodicMemory.ts`) — Session-level episodic records.
+
+7. **TopicMemory** (`src/memory/TopicMemory.ts`) — Per-Telegram-topic conversation memory.
+
+8. **MemoryIndex** (`src/memory/MemoryIndex.ts`) — FTS5 full-text search across all memory files.
+
+**Assessment — is there a conflict?**
+
+**NO filesystem conflict.** The two systems write to completely different paths:
+- Claude auto-memory → `~/.claude/projects/.../memory/MEMORY.md`
+- Instar MEMORY.md → `<project>/.instar/MEMORY.md`
+
+**NO functional conflict.** They serve different purposes:
+- Claude auto-memory: session-to-session context for Claude Code itself (codebase patterns, user preferences, debugging notes). Lightweight, unstructured, auto-managed.
+- Instar memory: structured knowledge graph with confidence scoring, decay, domain grouping, full-text search, episodic records, topic memory. Agent-managed, API-accessible.
+
+**Potential COORDINATION opportunity (not conflict):**
+
+The interesting question is whether Instar should READ Claude's auto-memory as an additional knowledge source:
+- Claude auto-memory captures things the agent noticed during sessions that Instar's structured pipeline might miss
+- It's free context — Claude already loads the first 200 lines into every session
+- BUT: it's per-user (`~/.claude/`), not per-project — on a shared machine, different users have different auto-memories
+
+**Risk: Instar agents writing to BOTH memory systems:**
+
+When an Instar agent runs a session, it might:
+1. Write to `.instar/MEMORY.md` (via reflect skill or manual edit) — this is expected
+2. Write to `~/.claude/projects/.../memory/MEMORY.md` (via Claude's auto-memory) — this happens silently
+
+Risk: The same insight gets captured in both places with slightly different wording. Not harmful, but inefficient. Over time, auto-memory accumulates stale entries that Instar's SemanticMemory has already processed and possibly decayed.
+
+**Instar already gitignores Claude auto-memory:**
+In `init.ts` line 815: `.claude/projects/` is added to `.gitignore`. This is correct — auto-memory is per-user local state, not project state.
+
+**ACTION ITEMS:**
+
+1. **No changes needed for compatibility** (CONFIRMED):
+   No filesystem collision. No functional overlap. Both can coexist safely.
+
+2. **Consider reading auto-memory as knowledge source** (LOW PRIORITY):
+   MemoryMigrator could optionally ingest `~/.claude/projects/<path>/memory/MEMORY.md` as an additional source. This would capture insights Claude auto-saved that the agent didn't explicitly write to `.instar/MEMORY.md`. Low priority because the value is marginal — most important things already flow through Instar's structured pipeline.
+
+3. **Document the two-memory-system reality** (MEDIUM PRIORITY):
+   Users (and agents) should understand: "You have TWO memory systems. `.instar/MEMORY.md` is your structured, managed memory. `~/.claude/projects/.../memory/MEMORY.md` is Claude Code's auto-memory. They don't conflict, but be aware both exist." Add to setup wizard or CLAUDE.md template.
+
+4. **Consider auto-memory hygiene job** (LOW PRIORITY — future):
+   A periodic job could sync insights from auto-memory into SemanticMemory and trim the auto-memory file to prevent unbounded growth. Not urgent because Claude self-manages auto-memory size (200-line context window creates natural pressure).
+
+**Testing requirements:**
+- Verify `.instar/MEMORY.md` and `~/.claude/projects/.../memory/MEMORY.md` don't interfere
+- Verify MemoryExporter writes only to `.instar/MEMORY.md`, never to auto-memory path
+- Verify `init.ts` gitignore includes `.claude/projects/`
+- Verify compaction-recovery.sh reads from `.instar/MEMORY.md` (correct path)
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — No conflict. Claude's auto-memory (`~/.claude/projects/.../memory/`) and Instar's memory (`.instar/MEMORY.md` + SemanticMemory SQLite) are completely separate systems writing to different directories. They coexist safely. The only coordination opportunity is optionally reading auto-memory as an additional knowledge source, which is low priority. Document the two-system reality for user awareness.
 
 ---
 
 ### 5. Model Reference Updates
 
-**Status:** PENDING
+**Status:** COMPATIBLE — ALREADY CURRENT
 
 **What Anthropic shipped:**
 - Opus 4.6 is now the default model
@@ -378,25 +435,53 @@ _(To be filled)_
 - Opus 4.0/4.1 deprecated
 - Sonnet 4.5 migrated to Sonnet 4.6
 
-**Audit questions:**
-- Do any Instar configs or docs reference deprecated models (Opus 4.0, 4.1, Sonnet 4.5)?
-- Does our model tiering configuration need updating?
-- Are there behavioral differences in Opus 4.6 vs 4.5 that affect our prompts?
-- Should our setup wizard default to specific model recommendations?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Model references in various config files and documentation
-- Model tiering in spawn configurations
+Instar has a centralized model dictionary at `src/core/models.ts`:
+```typescript
+ANTHROPIC_MODELS = {
+  opus: 'claude-opus-4-6',
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5'
+}
+CLI_MODEL_FLAGS = { opus: 'opus', sonnet: 'sonnet', haiku: 'haiku' }
+```
 
-**Integration opportunity:**
-- Ensure all model references are current
-- Leverage "ultrathink" for complex planning tasks
+ALL model references throughout the codebase route through this canonical source:
+- **3-tier system**: `ModelTier = 'opus' | 'sonnet' | 'haiku'`
+- **Legacy aliases**: `fast` → haiku, `balanced` → sonnet, `capable` → opus
+- **Job defaults**: Most jobs default to `haiku`, with severity-based escalation (e.g., git-sync escalates to sonnet for state conflicts, opus for code conflicts)
+- **Components using models**: StallTriageNurse (sonnet), MessageSentinel (haiku), ExternalOperationGate (haiku), DispatchExecutor (haiku), JobReflector (opus for complex reflection)
+- **Test coverage**: `tests/unit/Models.test.ts` (182 lines) + `tests/integration/model-resolution.test.ts` (196 lines) validate model IDs, tier resolution, and cross-component consistency
 
-**Investigation notes:**
-_(To be filled during audit)_
+**Audit results:**
+- **No deprecated model references found** — zero instances of `opus-4-0`, `opus-4-1`, `sonnet-4-5`, `claude-3`, or date-suffixed model IDs
+- **Model tiering already current** — all three active models (opus-4-6, sonnet-4-6, haiku-4-5) correctly referenced
+- **Centralized design** means future model updates require changing ONE file (`models.ts`)
+- **Test suite validates** model IDs lack 8-digit date suffixes, preventing accidental pinning to deprecated versions
+
+**"ultrathink" / effort level:**
+- NOT currently implemented in Instar
+- Claude Code's extended thinking is inherited automatically (agents get it for free when using Opus/Sonnet)
+- Explicit effort level control (e.g., `--effort high` or "ultrathink" keyword) is a future opportunity
+
+**ACTION ITEMS:**
+
+1. **No changes needed for model references** (CONFIRMED):
+   All model IDs are current. Centralized dictionary ensures single-point updates.
+
+2. **Consider effort level parameter** (LOW PRIORITY — future):
+   Instar could expose an `effort` parameter in job definitions: `effort: 'low' | 'medium' | 'high'`. This would let complex jobs (planning, research synthesis) request deeper thinking. Not urgent because Claude Code already uses extended thinking adaptively.
+
+3. **Consider "ultrathink" for planning tasks** (LOW PRIORITY — future):
+   Job prompts for complex tasks could include "ultrathink" keyword to trigger high effort. Worth testing empirically to see if quality improvement justifies the cost.
+
+**Testing requirements:**
+- Existing tests already validate model resolution and consistency
+- No new tests needed for this item
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — Instar's model references are already fully current with Opus 4.6, Sonnet 4.6, and Haiku 4.5. The centralized `models.ts` dictionary with comprehensive test coverage makes updates trivial. No deprecated models found anywhere in the codebase. Extended thinking / effort level control is a future opportunity but not a gap.
 
 ---
 
@@ -404,39 +489,85 @@ _(To be filled)_
 
 ### 6. Remote Control
 
-**Status:** PENDING
+**Status:** CONFLICT — INCOMPATIBLE WITH CURRENT ARCHITECTURE (but addressable)
 
 **What Anthropic shipped:**
-- Sessions accessible from claude.ai/code, Claude iOS/Android apps
-- Optional session naming via `--name`
-- Real-time session monitoring from any device
+- `claude remote-control [--name "session name"]` makes local sessions accessible from claude.ai/code, Claude iOS/Android apps
+- Outbound-only architecture — local session polls Anthropic API, never opens inbound ports
+- Full interaction: send messages, approve file changes, approve tool calls, redirect work
+- Session naming via `--name` (appears in session list at claude.ai/code)
+- Also available mid-session via `/remote-control` or `/rc` command
+- Works over SSH/tmux — survives laptop sleep and brief network drops
+- Multiple instances supported (one remote connection per Claude Code instance)
+- Config option: "Enable Remote Control for all sessions" via `/config`
 
-**Audit questions:**
-- Do Instar-spawned sessions work with Remote Control?
-- Does our session spawning pass `--name` for identifiable sessions?
-- Should the setup wizard make users aware of Remote Control?
-- How does Remote Control interact with our Telegram/WhatsApp monitoring?
+**CRITICAL INCOMPATIBILITY:**
 
-**Current Instar behavior:**
-- Sessions spawned via `claude` CLI without `--name`
-- Monitoring via Telegram/WhatsApp
+`--dangerously-skip-permissions` is **deliberately blocked** with Remote Control. Anthropic requires every action to be explicitly approved as a security decision when accessed remotely.
 
-**Integration opportunity:**
-- Pass `--name` with job/session identifiers for Remote Control visibility
-- Promote as additional monitoring channel alongside Telegram/WhatsApp
-- Setup wizard awareness
+Instar uses `--dangerously-skip-permissions` on **ALL** spawned sessions (both job and interactive). This is fundamental to autonomous operation — jobs can't run autonomously if every tool call requires human approval.
 
-**Investigation notes:**
-_(To be filled during audit)_
+This means: **Instar-spawned sessions CANNOT use Remote Control in their current form.**
+
+**Current Instar session spawning (code-traced):**
+
+All sessions go through `SessionManager.ts`:
+- Job sessions (line 193-197): `claude --dangerously-skip-permissions --model <model> -p <prompt>`
+- Interactive sessions (line 605-610): `claude --dangerously-skip-permissions [--resume <id>]`
+- **No `--name` flag** used anywhere
+- Session identity is entirely tmux-based: `{projectBasename}-{sanitizedName}`
+
+**Assessment — two distinct use cases:**
+
+1. **Autonomous job sessions** (the common case):
+   - MUST use `--dangerously-skip-permissions` for unattended operation
+   - Remote Control is incompatible AND unnecessary — these sessions don't need human interaction
+   - Telegram/WhatsApp monitoring is the right paradigm here
+   - **No action needed**
+
+2. **Interactive sessions** (user-initiated via Telegram):
+   - Currently use `--dangerously-skip-permissions` but could optionally NOT
+   - Remote Control would let users monitor/interact from their phone via claude.ai instead of Telegram
+   - BUT: this would mean every tool call needs approval, fundamentally changing the UX
+   - **Not a good fit** — Instar's value is autonomous operation, not permission-gated operation
+
+3. **Observation-only use case** (future opportunity):
+   - If Anthropic adds a "read-only Remote Control" mode (monitor without approval gates), this becomes valuable
+   - Users could watch their agent work in real-time from their phone without interrupting it
+   - Currently not possible — Remote Control is all-or-nothing on permissions
+
+**The `--name` flag — worth adding regardless:**
+
+Even without Remote Control, passing `--name` to Claude sessions is valuable:
+- Makes sessions identifiable in `claude --list` output
+- Better debugging when multiple sessions are running
+- Future-proofs for if/when Remote Control becomes compatible with autonomous sessions
+- Low effort: just add `--name {jobSlug or sessionName}` to spawn args
+
+**ACTION ITEMS:**
+
+1. **Pass `--name` flag when spawning sessions** (LOW PRIORITY):
+   Add `--name` to both `spawnSession()` and `spawnInteractiveSession()` with the job slug or session name. Makes sessions identifiable in `claude --list` and prepares for future Remote Control compatibility.
+
+2. **Document Remote Control incompatibility** (MEDIUM PRIORITY):
+   Users should know: "Remote Control requires permission approval for every action, which conflicts with autonomous operation. Use Telegram/WhatsApp monitoring instead." Add to setup wizard awareness or FAQ.
+
+3. **Monitor Anthropic for read-only Remote Control** (WATCH):
+   If Anthropic ships observation-only mode (monitor without permission gates), revisit integration. This would be the ideal complement to Telegram — real-time visual monitoring without interrupting autonomous work.
+
+**Testing requirements:**
+- Verify `--name` flag is accepted by current Claude Code version
+- Verify `--name` doesn't conflict with `--dangerously-skip-permissions`
+- Verify `--name` appears in `claude --list` output
 
 **Resolution:**
-_(To be filled)_
+CONFLICT (addressable) — Remote Control is fundamentally incompatible with Instar's autonomous operation because it blocks `--dangerously-skip-permissions`. This is by design (Anthropic's security decision). Instar's monitoring paradigm (Telegram/WhatsApp) is the correct approach for autonomous agents. The `--name` flag should be added for session identifiability regardless. Watch for Anthropic shipping a read-only observation mode.
 
 ---
 
 ### 7. Security Changes
 
-**Status:** PENDING
+**Status:** COMPATIBLE — NO BREAKAGE, ONE FORWARD-LOOKING CONCERN
 
 **What Anthropic shipped:**
 - Skill discovery no longer loads from gitignored directories
@@ -444,88 +575,226 @@ _(To be filled)_
 - Skills don't bypass permissions
 - Enhanced sandboxing
 
-**Audit questions:**
-- Are any of our hooks or skills in gitignored directories?
-- Do we rely on symlinks for any skill/hook resolution?
-- Does our permission model align with the new security constraints?
-- Any skills that previously worked that might now be blocked?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Skills and hooks in `.claude/` directory (not typically gitignored)
-- Various permission configurations
+**Skill directories — SAFE:**
+- Skills installed in `.claude/skills/` (NOT gitignored)
+- 12+ built-in skills (evolve, learn, gaps, commit-action, etc.)
+- Installed via `installBuiltinSkills()` in `init.ts`
+- Built-in manifest tracked at `src/data/builtin-manifest.json` (166 entries)
+- `.gitignore` does NOT block `.claude/` or `.claude/skills/`
 
-**Integration opportunity:**
-- Verify no breakage
-- Align our security model with Anthropic's enhancements
+**Symlinks — SAFE:**
+- Zero references to `fs.symlink()`, `ln -s`, or symlink creation anywhere in codebase
+- All hooks and skills use direct file paths
 
-**Investigation notes:**
-_(To be filled during audit)_
+**Hook placement — SAFE:**
+- Hooks installed in `.instar/hooks/instar/` (NOT gitignored)
+- 7+ hooks: session-start.sh, dangerous-command-guard.sh, grounding-before-messaging.sh, external-operation-gate.js, claim-intercept.js, deferral-detector.js, etc.
+- Settings template configures hooks via `.claude/settings.json` with PreToolUse, PostToolUse, SessionStart matchers
+
+**Sandbox settings — SAFE:**
+- Zero references to `--dangerouslyDisableSandbox`
+- Default sandboxing behavior inherited from Claude Code
+
+**Permission model — CURRENT STATUS OK, FORWARD-LOOKING CONCERN:**
+
+All sessions currently use `--dangerously-skip-permissions`:
+- `spawnSession()` (line 193): hardcoded for job sessions
+- `spawnInteractiveSession()` (line 605): hardcoded for interactive sessions
+
+The security changes Anthropic shipped (gitignore blocking, symlink prevention, skill permission scoping) do NOT affect `--dangerously-skip-permissions` sessions — that flag bypasses the permission system entirely.
+
+**However**, TelegramLifeline already has a forward-looking `--allowedTools` fallback (lines 960-975):
+```typescript
+const useAllowedTools = await this.supportsAllowedTools(claudePath);
+const permFlag = useAllowedTools
+  ? '--allowedTools Read,Write,Edit,Glob,Grep,Bash'
+  : '--dangerously-skip-permissions';
+```
+
+This suggests the architects anticipated `--dangerously-skip-permissions` potentially being deprecated. If Anthropic ever removes or restricts it, Instar has a partial migration path — but only in TelegramLifeline's doctor sessions. `spawnSession()` and `spawnInteractiveSession()` lack this fallback.
+
+**Assessment:**
+
+No current breakage. Anthropic's security tightening targets the permission-gated path (skills can't escalate, gitignored dirs blocked, symlinks prevented). Instar bypasses this entirely with `--dangerously-skip-permissions`. The security changes are about defense-in-depth for the permission-gated model, which Instar doesn't use.
+
+The only concern is future: if `--dangerously-skip-permissions` is deprecated or restricted, Instar needs the `--allowedTools` fallback in all spawn paths. But this is speculative — Anthropic explicitly supports the flag for autonomous agent use cases.
+
+**ACTION ITEMS:**
+
+1. **No changes needed for current compatibility** (CONFIRMED):
+   All skills in non-gitignored directories. No symlinks. No sandbox overrides. `--dangerously-skip-permissions` unaffected by security tightening.
+
+2. **Extend `--allowedTools` fallback to all spawn paths** (LOW PRIORITY — future-proofing):
+   Mirror TelegramLifeline's `supportsAllowedTools()` pattern in `spawnSession()` and `spawnInteractiveSession()`. Not urgent because `--dangerously-skip-permissions` is still fully supported.
+
+3. **Monitor Anthropic's stance on `--dangerously-skip-permissions`** (WATCH):
+   If deprecation signals appear, activate the `--allowedTools` migration. The pattern already exists in the codebase.
+
+**Testing requirements:**
+- Verify skills load correctly from `.claude/skills/` (no gitignore blocking)
+- Verify hooks execute from `.instar/hooks/instar/` under current sandboxing
+- Verify `--dangerously-skip-permissions` still functions as expected
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — No breakage from Anthropic's security tightening. All Instar skills and hooks are in non-gitignored directories with no symlinks. The security changes target the permission-gated model, which Instar bypasses via `--dangerously-skip-permissions`. Forward-looking: `--allowedTools` fallback pattern exists in TelegramLifeline and should eventually be extended to all spawn paths.
 
 ---
 
 ### 8. Plugin System Enhancements
 
-**Status:** PENDING
+**Status:** SYNERGY IDENTIFIED — MAJOR DISTRIBUTION OPPORTUNITY
 
 **What Anthropic shipped:**
-- `git-subdir` source type for plugins
-- `pluginTrustMessage` for user-facing trust prompts
-- Scope isolation between plugins
-- Marketplace improvements
+- Full plugin system: `.claude-plugin/plugin.json` manifest, namespaced skills (`/plugin-name:skill`), hooks, MCP servers, agents, LSP servers — all bundled in one distributable unit
+- `git-subdir` source type: sparse clone of monorepo subdirectories for efficient plugin hosting
+- Scope isolation: plugins namespaced, filesystem-isolated (no path traversal), components independent
+- Marketplace system: official Anthropic marketplace + custom marketplaces via GitHub repos
+- Installation scopes: user (global), project (shared via git), local (gitignored personal), managed (server-controlled)
+- Plugin management: `/plugin` interactive UI, `claude plugin install/enable/disable/update/uninstall` CLI
+- `${CLAUDE_PLUGIN_ROOT}` env var for portable script paths
+- `/reload-plugins` for live reload without restart
 
-**Audit questions:**
-- Are our skills compatible with the latest plugin spec?
-- Could Instar skills be distributed as plugins?
-- Does scope isolation affect how our skills interact?
-- Should we adopt `pluginTrustMessage` for third-party skill trust?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Skills are local files in project directories
-- No plugin distribution mechanism
+Instar's skill system is entirely local:
+- Skills are markdown files at `.claude/skills/{slug}/SKILL.md` with YAML frontmatter
+- 5 built-in evolution skills installed during `instar init`: evolve, learn, gaps, commit-action, feedback
+- `CapabilityMapper.scanSkills()` discovers skills via filesystem scan
+- Built-in manifest (`src/data/builtin-manifest.json`, 166 entries) tracks provenance: `instar` | `agent` | `user` | `inherited`
+- No plugin infrastructure, no external distribution, no marketplace integration
+- Agents self-author additional skills during sessions — captured expertise, not imported packages
 
-**Integration opportunity:**
-- Plugin-based skill distribution for the Instar ecosystem
-- Scope isolation for multi-tenant safety
+**Assessment — plugin distribution is a natural fit:**
 
-**Investigation notes:**
-_(To be filled during audit)_
+Instar's built-in skills (evolve, learn, gaps, commit-action, feedback) + hooks (dangerous-command-guard, session-start, compaction-recovery, etc.) are exactly what the plugin system is designed to distribute. Today, `instar init` writes these files locally. With the plugin system, Instar could be distributed as a Claude Code plugin:
+
+**What an "Instar Plugin" would look like:**
+```
+instar-plugin/
+├── .claude-plugin/
+│   └── plugin.json          # name: "instar", version, etc.
+├── skills/
+│   ├── evolve/SKILL.md
+│   ├── learn/SKILL.md
+│   ├── gaps/SKILL.md
+│   ├── commit-action/SKILL.md
+│   └── feedback/SKILL.md
+├── hooks/
+│   └── hooks.json           # PreToolUse, SessionStart, PostToolUse hooks
+├── agents/
+│   └── (custom agent definitions)
+└── mcp-config.json          # Instar server as MCP server
+```
+
+Users would install via: `/plugin install instar@instar-marketplace`
+
+Skills would be namespaced: `/instar:evolve`, `/instar:learn`, etc.
+
+**But: this is a FUTURE architecture, not a current need.**
+
+The plugin system is designed for distribution and sharing. Instar already handles its own distribution via npm (`npm install instar`) and `instar init`. Converting to a plugin model would be a significant architectural shift that changes:
+- How skills are discovered (plugin namespacing vs direct `/skill-name`)
+- How hooks are installed (plugin hooks.json vs init.ts file writes)
+- How updates work (plugin update vs npm update + init)
+- How the server integrates (MCP server vs standalone HTTP server)
+
+This is worth tracking as a FUTURE direction, not an immediate action.
+
+**Scope isolation — no current impact:**
+
+Instar skills all share the same context (no isolation). This is fine because they're all self-authored by the same agent. Plugin-style scope isolation would matter if Instar supported third-party skill packages — which it doesn't today.
+
+**Marketplace as Instar ecosystem distribution:**
+
+The bigger opportunity: Instar could host a MARKETPLACE of community-contributed skills. Users could share their agent-authored skills with other Instar users. This aligns with Claude Code's marketplace model and would be a natural extension once the user base grows.
+
+**ACTION ITEMS:**
+
+1. **No changes needed for current compatibility** (CONFIRMED):
+   Instar's local skill model works alongside plugins. No conflicts — they're parallel systems.
+
+2. **Evaluate Instar-as-plugin architecture** (LOW PRIORITY — future):
+   Could Instar's core components (hooks, skills, agent definitions) be packaged as a Claude Code plugin? This would simplify installation for new users: `/plugin install instar` instead of `npm install instar && instar init`. Major architectural shift — needs dedicated design work.
+
+3. **Consider community skill marketplace** (LOW PRIORITY — future):
+   Host a GitHub-based marketplace where Instar users share agent-authored skills. Natural fit with Claude Code's marketplace model. Depends on user base growth.
+
+4. **Consider MCP server integration** (MEDIUM PRIORITY — future):
+   Instar server could register as an MCP server via plugin manifest, making its capabilities (working memory, job scheduling, session management) available as native Claude Code tools. This would be a powerful integration point.
+
+**Testing requirements:**
+- Verify Instar skills load correctly alongside any installed plugins
+- Verify no naming conflicts between Instar skills and plugin-namespaced skills
+- Verify `instar init` doesn't interfere with plugin-installed components
 
 **Resolution:**
-_(To be filled)_
+SYNERGY IDENTIFIED — Claude Code's plugin system is a natural distribution mechanism for Instar's components (skills, hooks, agent definitions). Not actionable today — Instar's npm+init model works well — but tracking as a future architectural direction. The immediate wins are: (1) no current conflicts with plugin system, (2) MCP server integration via plugins could expose Instar's capabilities as native Claude Code tools, (3) community skill marketplace could leverage Claude Code's marketplace infrastructure.
 
 ---
 
 ### 9. VS Code Integration
 
-**Status:** PENDING
+**Status:** COMPATIBLE WITH CAVEATS — PARALLEL SYSTEMS, NOT INTEGRATED
 
 **What Anthropic shipped:**
-- Session list view in VS Code
+- Session list view in VS Code (see all Claude sessions)
 - Plan view for task tracking
 - Native `/mcp` management UI
 - Improved extension integration
 
-**Audit questions:**
-- Do Instar agents work when spawned from VS Code?
-- Does the session list show Instar-managed sessions?
-- Any conflicts with VS Code's MCP management and our MCP setup?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Agents spawned via CLI, not VS Code
-- No specific VS Code integration
+Instar's session model is entirely **tmux-based and terminal-centric**:
 
-**Integration opportunity:**
-- Ensure compatibility for users who prefer VS Code
-- VS Code as an alternative monitoring interface
+- All sessions spawned via `tmux new-session -d -s {name} -c {projectDir} ... claude ...`
+- Process monitoring via `tmux display-message` (alive/dead check)
+- Interactive message injection via tmux pane stdin (`injectMessage()`)
+- Session cleanup via `tmux kill-session`
+- Dashboard monitoring via WebSocket + HTTP API (`GET /sessions`, `/status`)
 
-**Investigation notes:**
-_(To be filled during audit)_
+**VS Code compatibility analysis:**
+
+1. **Instar server + VS Code terminal**: WORKS. Instar server runs independently (`instar server start`). The Instar server spawns Claude sessions in tmux regardless of where the server was started. VS Code's integrated terminal is just another terminal — it can run `instar` CLI commands, start the server, etc.
+
+2. **VS Code session list**: Instar-spawned sessions show up in VS Code's session list IF the user is logged into the same Claude account. VS Code sees all Claude sessions on the machine. Instar sessions would appear alongside any VS Code-spawned sessions. Session names would be whatever tmux names Instar generates (e.g., `instar-job-ai-guy-abc123`).
+
+3. **VS Code `/mcp` management**: Potential friction. Instar installs Playwright MCP via `.claude/settings.local.json`. VS Code's `/mcp` UI could show and modify this configuration. If a user changes MCP settings via VS Code, Instar's next `init` or update might overwrite them. Not a breakage, but a user confusion risk.
+
+4. **VS Code plan view**: No conflict. Instar doesn't track tasks in Claude Code's task system. VS Code's plan view shows Claude-internal tasks, which are orthogonal to Instar's job scheduler.
+
+5. **Can VS Code spawn sessions that Instar manages?**: NO. Instar's session management requires sessions to be in tmux. VS Code's Claude extension spawns sessions in its own runtime. Instar cannot monitor, inject messages into, or manage VS Code-spawned Claude sessions. These are separate worlds.
+
+**The two-world reality:**
+
+Users running Instar + VS Code will have TWO session systems:
+- **Instar sessions**: autonomous jobs, Telegram-interactive sessions, scheduled work — all in tmux, monitored by Instar dashboard + Telegram
+- **VS Code sessions**: manual coding sessions, ad-hoc Claude assistance — in VS Code, monitored by VS Code UI
+
+This is fine. They serve different purposes. The risk is user confusion ("which sessions are mine?") — Instar session names should be distinctive enough to identify.
+
+**ACTION ITEMS:**
+
+1. **No changes needed for compatibility** (CONFIRMED):
+   Instar and VS Code Claude sessions are parallel systems. No conflicts, no breakage.
+
+2. **Distinctive session naming** (LOW PRIORITY):
+   Ensure Instar's tmux session names are clearly identifiable (they already use `{projectName}-job-{slug}` pattern). When `--name` is added (Item 6, L10), use a clear prefix like `instar:job-name`.
+
+3. **Document the two-world model** (LOW PRIORITY):
+   Users should know: "Instar manages autonomous sessions via tmux. VS Code manages your manual coding sessions. They coexist — Instar sessions may appear in VS Code's session list but are managed independently."
+
+4. **MCP settings coordination** (LOW PRIORITY):
+   Document that Instar manages MCP config in `.claude/settings.local.json`. Users modifying MCP via VS Code's `/mcp` UI should be aware that `instar init` may overwrite local settings.
+
+**Testing requirements:**
+- Verify Instar server starts and spawns sessions normally when launched from VS Code terminal
+- Verify Instar sessions appear in VS Code's session list view
+- Verify no MCP configuration conflicts between Instar setup and VS Code `/mcp` UI
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE WITH CAVEATS — Instar and VS Code Claude sessions are parallel systems that coexist without conflict. VS Code can see Instar sessions in its list view but cannot manage them (tmux vs extension runtime). No changes needed. Document the two-world model for user clarity. Coordinate MCP settings to avoid overwrite confusion.
 
 ---
 
@@ -533,104 +802,142 @@ _(To be filled)_
 
 ### 10. Voice Input (20 languages)
 
-**Status:** PENDING
+**Status:** COMPATIBLE — NOT APPLICABLE TO INSTAR'S USE CASE
 
 **What Anthropic shipped:**
-- STT expanded to 20 languages
+- STT expanded to 20 languages in Claude Code CLI
 - Push-to-talk keybinding support
 
-**Audit questions:**
-- Do Instar-spawned sessions inherit voice capabilities?
-- Any configuration needed to enable voice in spawned sessions?
+**Current Instar behavior (code-traced):**
 
-**Integration opportunity:**
-- Verify inheritance, document as a feature
+Instar has its OWN voice transcription pipeline for Telegram:
+- `TelegramAdapter.ts` handles voice messages from Telegram users
+- Transcription via Groq (whisper-large-v3) or OpenAI (whisper-1)
+- Configurable via `voiceProvider` config or env vars
+- Voice messages arrive pre-transcribed before reaching the Claude session
 
-**Investigation notes:**
-_(To be filled during audit)_
+Claude Code's voice input is a CLI-interactive feature (push-to-talk while typing). Instar-spawned sessions are headless (`-p` prompt mode) or tmux-based REPL — neither has a microphone interface.
+
+**Assessment:**
+
+Voice input is irrelevant for Instar's architecture:
+- Headless job sessions: no human present to speak
+- Interactive Telegram sessions: voice comes through Telegram, transcribed by Instar, sent as text to Claude
+- The user talks to their agent via Telegram voice messages, not via Claude Code's CLI microphone
+
+No conflicts, no action needed.
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — Not applicable. Claude Code's voice input is a CLI-interactive feature. Instar handles voice through Telegram's voice message pipeline with its own Whisper transcription. No overlap, no conflict.
 
 ---
 
 ### 11. Performance Improvements
 
-**Status:** PENDING
+**Status:** COMPATIBLE — FREE WINS, NO ACTION NEEDED
 
 **What Anthropic shipped:**
-- ~16MB memory reduction
+- ~16MB memory reduction per session
 - Bridge reconnection in seconds (was 10 minutes)
 - Images preserved during compaction
 
-**Audit questions:**
-- Does bridge reconnection improve our session reliability?
-- Does reduced memory impact our multi-session scaling?
-- How does image preservation during compaction affect our sessions?
+**Impact on Instar:**
 
-**Integration opportunity:**
-- Better session stability from bridge reconnection
-- More headroom for parallel sessions
+All three improvements are automatically inherited:
 
-**Investigation notes:**
-_(To be filled during audit)_
+1. **~16MB memory reduction**: Instar runs up to 3 concurrent sessions (`maxSessions: 3`). At 16MB savings each, that's ~48MB less memory pressure. Helps especially on lower-spec machines and when `OrphanProcessReaper` is monitoring memory. Free win.
+
+2. **Bridge reconnection (seconds vs 10 minutes)**: This is the most impactful improvement. Instar's `StallDetector` monitors sessions for hangs and triggers triage after configurable timeouts. Previously, a bridge disconnect looked like a stall — the session appeared unresponsive for up to 10 minutes. Faster reconnection means fewer false stall detections and more reliable long-running autonomous sessions. Free win.
+
+3. **Images preserved during compaction**: Minimal impact for most Instar agents (primarily text-based work). Could matter for agents processing screenshots, diagrams, or visual content. Free win.
+
+**No action needed.** These are upstream improvements that make Instar sessions more reliable and efficient automatically.
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — All three performance improvements are inherited for free. Bridge reconnection improvement is especially valuable for reducing false stall detections in long-running autonomous sessions.
 
 ---
 
 ### 12. `/loop` Command
 
-**Status:** PENDING
+**Status:** COMPATIBLE — COMPLEMENTARY, NOT COMPETING
 
 **What Anthropic shipped:**
-- Recurring prompt execution within a session
-- Configurable interval
+- `/loop` runs a recurring prompt within a single session at configurable intervals
+- Session stays alive between iterations
+- Context accumulates across iterations
 
-**Audit questions:**
-- Does this complement or conflict with our persistent job scheduler?
-- Could `/loop` replace lightweight recurring tasks?
-- How does `/loop` interact with session lifecycle?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Full job scheduler with cron-like scheduling
-- Jobs spawn new sessions
+Instar's job scheduler (`JobScheduler.ts`) is fundamentally different:
+- Jobs spawn NEW sessions each execution (fresh context every time)
+- Scheduling via cron expressions (every N hours, daily at time, etc.)
+- Sessions end after job completion
+- Cross-session continuity via MEMORY.md and state files, not context accumulation
 
-**Integration opportunity:**
-- Complementary: `/loop` for intra-session recurrence, Instar scheduler for cross-session jobs
-- Document the distinction for users
+**Assessment — different layers, different purposes:**
 
-**Investigation notes:**
-_(To be filled during audit)_
+| Aspect | `/loop` | Instar Scheduler |
+|--------|---------|-----------------|
+| Scope | Within one session | Across sessions |
+| Context | Accumulates | Fresh each run |
+| Scheduling | Simple interval | Full cron expressions |
+| Persistence | Dies with session | Survives restarts |
+| Cost | Single session | New session per run |
+
+They're complementary:
+- **`/loop`**: Good for intra-session monitoring (watch a log file, poll an endpoint, periodic self-check). Context builds up, enabling the agent to notice trends.
+- **Instar scheduler**: Good for independent recurring tasks (daily report, hourly health check). Fresh context each run, no state leakage between executions.
+
+**Potential synergy:**
+
+Instar could inject `/loop` into long-running interactive sessions for periodic self-checks (memory status, stall prevention, working memory refresh). Currently Instar handles this externally via `StallDetector` — `/loop` could make it agent-internal.
+
+**No conflicts.** `/loop` is a session-level command that doesn't affect Instar's scheduling infrastructure.
+
+**ACTION ITEMS:**
+
+1. **No changes needed for compatibility** (CONFIRMED).
+
+2. **Consider `/loop` for intra-session monitoring** (LOW PRIORITY — future):
+   Long-running interactive sessions could use `/loop` for periodic self-checks. Complement to external stall detection.
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — `/loop` and Instar's scheduler operate at different layers (intra-session vs cross-session). Complementary, not competing. No conflicts.
 
 ---
 
 ### 13. `/simplify` and `/batch`
 
-**Status:** PENDING
+**Status:** COMPATIBLE — INHERITED TOOLS, MINOR SYNERGY
 
 **What Anthropic shipped:**
-- `/simplify`: Code complexity reduction tool
-- `/batch`: Parallel task execution
+- `/simplify`: Reviews changed code for reuse, quality, and efficiency, then fixes issues found
+- `/batch`: Parallel task execution within a session (multiple subagents working simultaneously)
 
-**Audit questions:**
-- Could `/simplify` integrate into our evolution system?
-- Does `/batch` overlap with our parallel session spawning?
-- Any conflicts with our skill system?
+**Current Instar behavior:**
 
-**Integration opportunity:**
-- `/simplify` as evolution cycle tool
-- `/batch` for multi-file operations within a session
+No references to `/simplify` or `/batch` in the Instar codebase. These are Claude Code session-level commands available to any agent during a session.
 
-**Investigation notes:**
-_(To be filled during audit)_
+**Assessment:**
+
+Both are inherited for free — any Instar agent can invoke them during a session:
+
+- **`/simplify`**: An agent could use this after making code changes as a quality check. Natural fit for Instar's evolution skills — the `evolve` skill could invoke `/simplify` as part of its code improvement workflow. No conflict with existing skills.
+
+- **`/batch`**: Parallel task execution within a session. Different from Instar's parallel sessions (separate tmux processes). `/batch` runs multiple subagents in the SAME context window. Useful for multi-file operations (update 10 config files, refactor across modules). Complementary to Instar's session-level parallelism.
+
+**No conflicts.** These are session-level tools that agents can use freely.
+
+**ACTION ITEMS:**
+
+1. **No changes needed** (CONFIRMED).
+
+2. **Consider `/simplify` in evolution workflow** (LOW PRIORITY — future):
+   The `evolve` skill could invoke `/simplify` after code changes as an automated quality pass.
 
 **Resolution:**
-_(To be filled)_
+COMPATIBLE — Both commands are inherited session-level tools. `/simplify` could integrate into evolution workflows. `/batch` complements Instar's cross-session parallelism with intra-session parallelism. No conflicts.
 
 ---
 
@@ -681,7 +988,66 @@ _(To be filled)_
 - [ ] Remote Control compatibility test
 
 ### Architecture Decisions Log
-_(Record key decisions made during this audit)_
+
+1. **Worktrees: awareness, not adoption** — Instar should NOT use worktrees itself, but must detect when Claude Code creates them implicitly and prevent silent work loss.
+2. **HTTP hooks: observability, not safety** — HTTP hooks for telemetry (PostToolUse, SubagentStart/Stop, WorktreeCreate/Remove). Shell hooks stay for safety gates (dangerous-command-guard, session-start, compaction-recovery) because HTTP hooks cannot reliably block actions.
+3. **Remote Control: incompatible by design** — Blocks `--dangerously-skip-permissions`. Instar's Telegram/WhatsApp monitoring is the correct paradigm for autonomous agents. Not a bug, architectural divergence.
+4. **Model references: centralized and current** — Single source of truth at `src/core/models.ts`. No deprecated models found.
+
+---
+
+## Consolidated Action Items
+
+> Extracted from all completed audit items. Prioritized for implementation.
+
+### HIGH PRIORITY
+
+| # | Item | Source | Description |
+|---|------|--------|-------------|
+| H1 | Post-session worktree scan | Item 1 | Wire into `sessionComplete`: run `git worktree list`, check for uncommitted/unmerged changes on worktree branches, alert via Telegram |
+| H2 | Hook event receiver endpoint | Item 2 | Add `POST /hooks/events` to Instar server — receives hook event payloads, stores for session telemetry |
+| H3 | HTTP hook templates for observability | Item 2 | Ship templates for PostToolUse, TaskCompleted, SubagentStart/Stop, WorktreeCreate/Remove, Stop |
+| H4 | InstructionsLoaded hook | Item 3 | Command hook that verifies expected CLAUDE.md files loaded; alerts if identity context missing |
+| H5 | SubagentStart/Stop hooks | Item 3 | Track subagent lifecycle, capture `last_assistant_message` and `agent_transcript_path` from SubagentStop |
+| H6 | Stop + SessionEnd hooks | Item 3 | Capture `last_assistant_message` (final output) and exit reason; wire into sessionComplete handler |
+
+### MEDIUM PRIORITY
+
+| # | Item | Source | Description |
+|---|------|--------|-------------|
+| M1 | Periodic orphan worktree detection | Item 1 | Health check: `git worktree list` + `git branch --list 'worktree-*'` across managed projects, flag stale worktrees |
+| M2 | WorktreeCreate/WorktreeRemove hooks | Item 1 | POST to Instar server on worktree lifecycle events (also covered by H3) |
+| M3 | Update settings-template.json | Item 2 | Add HTTP hook entries alongside existing command hooks |
+| M4 | Parse agent_id/agent_type from existing hooks | Item 3 | Existing PreToolUse/UserPromptSubmit hooks now carry these fields — extract and log |
+| M5 | TaskCompleted as quality gate | Item 3 | Verify task completion before marking job done (complement to process-death inference) |
+| M6 | Document two-memory-system reality | Item 4 | Users should know: `.instar/MEMORY.md` vs `~/.claude/projects/.../memory/MEMORY.md` — add to setup wizard or CLAUDE.md template |
+| M7 | Document Remote Control incompatibility | Item 6 | Add to FAQ/setup wizard: Remote Control requires permission approval, incompatible with autonomous operation |
+
+### LOW PRIORITY
+
+| # | Item | Source | Description |
+|---|------|--------|-------------|
+| L1 | Session-branch linking | Item 1 | Record which branch a session was on and any worktree branches it created |
+| L2 | Merge-back prompt for orphan branches | Item 1 | Surface orphan worktree branches with commits to user for merge decision |
+| L3 | Cross-machine hook forwarding | Item 2 | HTTP hooks from remote machines POST to centralized Instar server via tunnel |
+| L4 | PreCompact hook | Item 3 | Know when compaction occurs; could trigger working memory injection or frequent-compaction alerts |
+| L5 | Wire ExecutionJournal to PostToolUse | Item 3 | ExecutionJournal infrastructure exists but is inactive — PostToolUse feeds it |
+| L6 | Read auto-memory as knowledge source | Item 4 | MemoryMigrator could optionally ingest Claude auto-memory as additional source |
+| L7 | Auto-memory hygiene job | Item 4 | Periodic sync from auto-memory into SemanticMemory + trim |
+| L8 | Effort level parameter for jobs | Item 5 | `effort: 'low' | 'medium' | 'high'` in job definitions for deeper thinking on complex tasks |
+| L9 | "ultrathink" keyword in planning prompts | Item 5 | Worth testing empirically for complex job prompts |
+| L10 | Pass `--name` flag to sessions | Item 6 | Add `--name {jobSlug}` to spawn args for session identifiability |
+| L11 | Extend `--allowedTools` fallback to all spawn paths | Item 7 | Mirror TelegramLifeline's `supportsAllowedTools()` in `spawnSession()` and `spawnInteractiveSession()` |
+| L12 | Evaluate Instar-as-plugin architecture | Item 8 | Could core components (hooks, skills, agents) be packaged as a Claude Code plugin? Major arch shift — needs design |
+| L13 | Community skill marketplace | Item 8 | GitHub-based marketplace for Instar users to share agent-authored skills. Depends on user base growth |
+| L14 | MCP server plugin integration | Item 8 | Register Instar server as MCP server via plugin manifest — exposes working memory, job scheduling as native tools |
+
+### WATCH
+
+| # | Item | Source | Description |
+|---|------|--------|-------------|
+| W1 | Read-only Remote Control mode | Item 6 | If Anthropic ships observation-only mode (monitor without permission gates), revisit integration |
+| W2 | `--dangerously-skip-permissions` deprecation | Item 7 | If Anthropic signals deprecation, activate `--allowedTools` migration across all spawn paths |
 
 ---
 
@@ -691,3 +1057,5 @@ _(Record key decisions made during this audit)_
 |------|---------|----------------|-------|
 | 2026-03-07 | Initial research (topic 4509) | All 14 items identified | Research phase complete |
 | 2026-03-07 | Document creation (topic 11047) | Document seated | Ready for deep-dive work |
+| 2026-03-07 | Deep-dive session 1 (topic 11047) | Items 1-4 completed | Worktrees, HTTP Hooks, New Hook Events, Auto-Memory |
+| 2026-03-08 | Deep-dive session 2 (topic 11047) | Items 5-6 completed | Model References (clean), Remote Control (incompatible) |

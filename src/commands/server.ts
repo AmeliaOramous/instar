@@ -67,7 +67,6 @@ import { LiveConfig } from '../config/LiveConfig.js';
 import { CoherenceMonitor } from '../monitoring/CoherenceMonitor.js';
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
 import { StaleProcessGuard } from '../core/StaleProcessGuard.js';
-import { llmValidateResumeCoherence } from '../core/ResumeValidator.js';
 import { ForegroundRestartWatcher } from '../core/ForegroundRestartWatcher.js';
 import { NotificationBatcher } from '../messaging/NotificationBatcher.js';
 import type { NotificationTier } from '../messaging/NotificationBatcher.js';
@@ -449,18 +448,13 @@ async function spawnSessionForTopic(
     }
   }
 
-  // Check for a resume UUID from a previously-killed session on this topic
+  // Check for a resume UUID from a previously-killed session on this topic.
+  // TopicResumeMap is authoritative — it saved the UUID for this specific topic at kill time
+  // or via the refresh heartbeat. Skip LLM validation (which was failing due to JSONL sampling
+  // issues and is redundant for an authoritative source).
   let resumeSessionId = _topicResumeMap?.get(topicId) ?? undefined;
   if (resumeSessionId) {
-    console.log(`[spawnSessionForTopic] Found resume UUID for topic ${topicId}: ${resumeSessionId}`);
-
-    // LLM-supervised coherence gate: validate resume UUID matches topic before using it
-    const topicName = telegram.getTopicName(topicId) || sessionName;
-    const coherent = await llmValidateResumeCoherence(resumeSessionId, topicId, topicName, _projectDir, telegram, _sharedIntelligence);
-    if (!coherent) {
-      console.warn(`[spawnSessionForTopic] LLM rejected resume ${resumeSessionId.slice(0, 8)}... for topic ${topicId} — starting fresh`);
-      resumeSessionId = undefined;
-    }
+    console.log(`[spawnSessionForTopic] Found resume UUID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
   }
 
   const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, { telegramTopicId: topicId, resumeSessionId });

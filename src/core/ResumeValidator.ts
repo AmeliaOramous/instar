@@ -98,7 +98,9 @@ export async function llmValidateResumeCoherence(
       }
     }
 
-    // 2. Sample the resume JSONL
+    // 2. Sample the resume JSONL — read from BOTH head (initial prompt, most identifying)
+    // and tail (recent activity). Claude JSONL entries use various types; only some have
+    // message.content. We also check for type-based entries, slug fields, etc.
     let sessionContext = '';
     if (deps.readSessionJsonl) {
       sessionContext = deps.readSessionJsonl(resumeUuid);
@@ -113,26 +115,66 @@ export async function llmValidateResumeCoherence(
       if (fs.existsSync(jsonlPath)) {
         try {
           const stat = fs.statSync(jsonlPath);
-          const readSize = Math.min(4096, stat.size);
           const fd = fs.openSync(jsonlPath, 'r');
-          const buf = Buffer.alloc(readSize);
-          fs.readSync(fd, buf, 0, readSize, Math.max(0, stat.size - readSize));
-          fs.closeSync(fd);
-
-          const tail = buf.toString('utf-8');
-          const lines = tail.split('\n').filter(l => l.trim());
           const snippets: string[] = [];
-          for (const line of lines.slice(-5)) {
+
+          // Helper: extract text content from a JSONL entry
+          const extractContent = (entry: any): string | undefined => {
+            // Standard message.content (human/assistant messages)
+            if (entry.message?.content) {
+              const content = entry.message.content;
+              if (typeof content === 'string' && content.length > 10) return content.slice(0, 300);
+              if (Array.isArray(content)) {
+                for (const block of content) {
+                  if (block?.text && block.text.length > 10) return block.text.slice(0, 300);
+                }
+              }
+            }
+            // Type-based entries (human/assistant turns)
+            if (entry.type === 'human' && typeof entry.content === 'string' && entry.content.length > 10) {
+              return entry.content.slice(0, 300);
+            }
+            if (entry.type === 'assistant' && typeof entry.content === 'string' && entry.content.length > 10) {
+              return entry.content.slice(0, 300);
+            }
+            // Summary/slug fields that identify the session
+            if (entry.slug && typeof entry.slug === 'string') return `[session: ${entry.slug}]`;
+            return undefined;
+          };
+
+          // Read HEAD — first 16KB (contains initial prompt, session identity)
+          const headSize = Math.min(16384, stat.size);
+          const headBuf = Buffer.alloc(headSize);
+          fs.readSync(fd, headBuf, 0, headSize, 0);
+          const headLines = headBuf.toString('utf-8').split('\n').filter(l => l.trim());
+          for (const line of headLines) {
+            if (snippets.length >= 3) break;
             try {
               const entry = JSON.parse(line);
-              if (entry.message?.content) {
-                const content = typeof entry.message.content === 'string'
-                  ? entry.message.content.slice(0, 200)
-                  : JSON.stringify(entry.message.content).slice(0, 200);
-                snippets.push(content);
-              }
-            } catch { /* not valid JSON, skip */ }
+              const text = extractContent(entry);
+              if (text) snippets.push(`[start] ${text}`);
+            } catch { /* partial/malformed line */ }
           }
+
+          // Read TAIL — last 32KB (more data to find actual content entries)
+          if (stat.size > headSize) {
+            const tailSize = Math.min(32768, stat.size - headSize);
+            const tailBuf = Buffer.alloc(tailSize);
+            fs.readSync(fd, tailBuf, 0, tailSize, Math.max(0, stat.size - tailSize));
+            const tailLines = tailBuf.toString('utf-8').split('\n').filter(l => l.trim());
+            const tailSnippets: string[] = [];
+            for (const line of tailLines) {
+              try {
+                const entry = JSON.parse(line);
+                const text = extractContent(entry);
+                if (text) tailSnippets.push(`[recent] ${text}`);
+              } catch { /* partial/malformed line */ }
+            }
+            snippets.push(...tailSnippets.slice(-3));
+          }
+
+          fs.closeSync(fd);
+
           sessionContext = snippets.length > 0
             ? `Session content samples:\n${snippets.map(s => `  ${s}`).join('\n')}`
             : '(Could not extract readable content from session JSONL)';
