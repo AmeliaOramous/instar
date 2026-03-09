@@ -167,3 +167,7 @@ export type {
 
 export { generateSkillManifest } from './OpenClawSkillManifest.js';
 export type { SkillManifest } from './OpenClawSkillManifest.js';
+
+// Threadline Bootstrap (auto-wiring into server boot)
+export { bootstrapThreadline } from './ThreadlineBootstrap.js';
+export type { ThreadlineBootstrapConfig, ThreadlineBootstrapResult } from './ThreadlineBootstrap.js';

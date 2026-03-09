@@ -85,6 +85,8 @@ import { createSessionProbes } from '../monitoring/probes/SessionProbe.js';
 import { createSchedulerProbes } from '../monitoring/probes/SchedulerProbe.js';
 import { createMessagingProbes } from '../monitoring/probes/MessagingProbe.js';
 import { createLifelineProbes } from '../monitoring/probes/LifelineProbe.js';
+import { createPlatformProbes } from '../monitoring/probes/PlatformProbe.js';
+import { bootstrapThreadline } from '../threadline/ThreadlineBootstrap.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
 import type { Message, IntelligenceProvider, UserProfile, InstarConfig } from '../core/types.js';
@@ -1587,6 +1589,10 @@ export async function startServer(options: StartOptions): Promise<void> {
     let scheduler: JobScheduler | undefined;
     if (config.scheduler.enabled && coordinator.isAwake) {
       scheduler = new JobScheduler(config.scheduler, sessionManager, state, config.stateDir);
+      // Wire machine identity for machine-scoped job filtering
+      if (coordinator.identity) {
+        scheduler.setMachineIdentity(coordinator.identity.machineId, coordinator.identity.name);
+      }
       if (quotaTracker) {
         // Basic binding — QuotaManager will override this once wired
         scheduler.canRunJob = quotaTracker.canRunJob.bind(quotaTracker);
@@ -2906,13 +2912,37 @@ export async function startServer(options: StartOptions): Promise<void> {
           lockFilePath: path.join(config.stateDir, 'lifeline.lock'),
           isEnabled: () => fs.existsSync(path.join(config.stateDir, 'lifeline.lock')),
         }),
+        ...createPlatformProbes({
+          tmuxPath,
+        }),
       ];
       systemReviewer.registerAll(probes);
       systemReviewer.start();
       console.log(pc.green(`  System Reviewer: ${probes.length} probes registered`));
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier });
+    // ── Threadline Protocol: auto-bootstrap ──────────────────────────
+    // Threadline is always ON — MCP tools registered into Claude Code,
+    // discovery heartbeat running, identity keys persisted.
+    // The user never sees any of this. The agent IS the interface.
+    let threadlineHandshake: import('../threadline/HandshakeManager.js').HandshakeManager | undefined;
+    let threadlineShutdown: (() => Promise<void>) | undefined;
+    try {
+      const threadline = await bootstrapThreadline({
+        agentName: config.projectName,
+        stateDir: config.stateDir,
+        projectDir: config.projectDir,
+        port: config.port,
+      });
+      threadlineHandshake = threadline.handshakeManager;
+      threadlineShutdown = threadline.shutdown;
+      console.log(pc.green(`  Threadline: enabled (MCP tools registered, discovery heartbeat active)`));
+    } catch (err) {
+      // Non-fatal — agent works without Threadline
+      console.warn(pc.yellow(`  Threadline: failed to bootstrap — ${err instanceof Error ? err.message : String(err)}`));
+    }
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
@@ -3047,6 +3077,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       autoDispatcher?.stop();
       sessionMonitor?.stop();
       if (tunnel) await tunnel.stop();
+      if (threadlineShutdown) await threadlineShutdown();
       stopHeartbeat();
       unregisterAgent(config.projectDir);
       scheduler?.stop();
