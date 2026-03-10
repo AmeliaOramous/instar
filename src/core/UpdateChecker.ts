@@ -188,6 +188,21 @@ export class UpdateChecker {
           '--ignore-scripts',
           '--prefix', shadowDir,
         ], 120000);
+
+        // Rebuild native modules after --ignore-scripts installation.
+        // --ignore-scripts skips better-sqlite3's build step, leaving no .node binaries.
+        // Without this, TopicMemory and SemanticMemory fail silently on shadow installs.
+        // better-sqlite3 uses node-gyp and can rebuild from source in ~30 seconds.
+        try {
+          await this.execAsync('npm', [
+            'rebuild', 'better-sqlite3',
+            '--prefix', shadowDir,
+          ], 60000);
+          console.log(`[UpdateChecker] Rebuilt better-sqlite3 native bindings in shadow install`);
+        } catch (rebuildErr) {
+          // Non-fatal: fallback SQLite behavior (legacy JSONL) handles the case
+          console.warn(`[UpdateChecker] better-sqlite3 rebuild failed (legacy fallback active): ${rebuildErr instanceof Error ? rebuildErr.message : String(rebuildErr)}`);
+        }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
         continue;
