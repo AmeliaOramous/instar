@@ -62,6 +62,9 @@ type FeedbackSubmitter = (item: {
   context?: string;
 }) => Promise<unknown>;
 
+// How long before the same feature can trigger another Telegram alert (ms)
+const ALERT_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour
+
 export class DegradationReporter {
   private static instance: DegradationReporter | null = null;
 
@@ -74,6 +77,9 @@ export class DegradationReporter {
   private feedbackSubmitter: FeedbackSubmitter | null = null;
   private telegramSender: TelegramSender | null = null;
   private alertTopicId: number | null = null;
+
+  // Dedup: track last alert time per feature to avoid spamming Telegram
+  private lastAlertTime: Map<string, number> = new Map();
 
   private constructor() {}
 
@@ -211,19 +217,27 @@ export class DegradationReporter {
       }
     }
 
-    // Send Telegram alert
+    // Send Telegram alert (with per-feature cooldown to avoid spam)
     if (this.telegramSender && this.alertTopicId && !event.alerted) {
-      try {
-        await this.telegramSender(
-          this.alertTopicId,
-          `⚠️ DEGRADATION: ${event.feature}\n\n` +
-          `Reason: ${event.reason}\n` +
-          `Impact: ${event.impact}\n` +
-          `Fallback: ${event.fallback}`,
-        );
+      const lastAlert = this.lastAlertTime.get(event.feature) ?? 0;
+      const now = Date.now();
+
+      if (now - lastAlert >= ALERT_COOLDOWN_MS) {
+        try {
+          await this.telegramSender(
+            this.alertTopicId,
+            `Heads up: ${event.impact} ` +
+            `Your agent is still running — this usually resolves on its own. ` +
+            `(${event.feature}: ${event.fallback})`,
+          );
+          event.alerted = true;
+          this.lastAlertTime.set(event.feature, now);
+        } catch {
+          // Don't fail on alerting failures
+        }
+      } else {
+        // Within cooldown — suppress the alert but mark as handled
         event.alerted = true;
-      } catch {
-        // Don't fail on alerting failures
       }
     }
 
