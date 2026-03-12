@@ -37,6 +37,7 @@ import type { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js
 import type { TopicMemory } from '../memory/TopicMemory.js';
 import type { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { createRoutes } from './routes.js';
+import { createFileRoutes } from './fileRoutes.js';
 import { mountWhatsAppWebhooks } from '../messaging/backends/WhatsAppWebhookRoutes.js';
 import { createMachineRoutes } from './machineRoutes.js';
 import { corsMiddleware, authMiddleware, requestTimeout, errorHandler } from './middleware.js';
@@ -287,6 +288,10 @@ export class AgentServer {
       startTime: this.startTime,
     });
     this.app.use(routes);
+
+    // File viewer routes (after auth middleware)
+    const fileRoutes = createFileRoutes({ config: options.config });
+    this.app.use(fileRoutes);
 
     // Error handler (must be last)
     this.app.use(errorHandler);

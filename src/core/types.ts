@@ -1346,6 +1346,37 @@ export interface InstarConfig {
   inputGuard?: InputGuardConfig;
   /** Threadline relay — cloud relay connection for inter-agent communication */
   threadline?: ThreadlineConfig;
+  /** Dashboard configuration */
+  dashboard?: DashboardConfig;
+}
+
+// ── Dashboard ───────────────────────────────────────────────────────
+
+export interface DashboardConfig {
+  /** File viewer configuration */
+  fileViewer?: FileViewerConfig;
+}
+
+export interface FileViewerConfig {
+  /** Enable the file viewer tab in the dashboard. Default: true */
+  enabled: boolean;
+
+  /** Directories available for browsing (relative to project root).
+   *  Default: ['.claude/', 'docs/'] */
+  allowedPaths: string[];
+
+  /** Directories where editing is permitted (subset of allowedPaths).
+   *  Default: [] — nothing editable without explicit opt-in. */
+  editablePaths: string[];
+
+  /** Maximum file size to serve for reading (bytes). Default: 1048576 (1MB) */
+  maxFileSize: number;
+
+  /** Maximum file size for editing (bytes). Default: 204800 (200KB) */
+  maxEditableFileSize: number;
+
+  /** File patterns that are NEVER served, even within allowed directories. */
+  blockedFilenames: string[];
 }
 
 // ── Threadline Relay ────────────────────────────────────────────────
