@@ -396,12 +396,15 @@ export class MessageSentinel {
       const validCategories: SentinelCategory[] = ['emergency-stop', 'pause', 'redirect', 'normal'];
 
       if (!validCategories.includes(category)) {
-        // Unparseable → err toward caution
+        // Unparseable → pass through. If the LLM can't return a single word,
+        // the classification is unreliable — don't disrupt the session based
+        // on garbage output. Log it for debugging.
+        console.warn(`[sentinel] LLM returned unparseable response: "${response.trim().slice(0, 200)}"`);
         return {
-          category: 'pause',
-          confidence: 0.4,
-          action: { type: 'pause-session' },
-          reason: `LLM response unparseable: "${response.trim()}"`,
+          category: 'normal',
+          confidence: 0.2,
+          action: { type: 'pass-through' },
+          reason: `LLM response unparseable (passed through)`,
         };
       }
 

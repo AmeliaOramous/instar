@@ -299,7 +299,7 @@ describe('MessageSentinel', () => {
       expect(result.action.type).toBe('pass-through');
     });
 
-    it('unparseable LLM response defaults to pause (cautious)', async () => {
+    it('unparseable LLM response defaults to pass-through (not disruptive)', async () => {
       sentinel = new MessageSentinel({
         intelligence: {
           evaluate: async () => 'I think this is probably a stop command but maybe not',
@@ -307,8 +307,8 @@ describe('MessageSentinel', () => {
       });
 
       const result = await sentinel.classify('maybe we should reconsider');
-      expect(result.category).toBe('pause');
-      expect(result.action.type).toBe('pause-session');
+      expect(result.category).toBe('normal');
+      expect(result.action.type).toBe('pass-through');
     });
 
     it('long messages with stop-like words route to LLM (word count gate)', async () => {

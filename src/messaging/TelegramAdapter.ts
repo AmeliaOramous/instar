@@ -294,6 +294,8 @@ export class TelegramAdapter implements MessagingAdapter {
   public onClassifySessionDeath: ((sessionName: string) => Promise<{ cause: string; detail: string } | null>) | null = null;
   /** LLM-powered stall triage — called instead of generic stall alert when set */
   public onStallDetected: ((topicId: number, sessionName: string, messageText: string, injectedAt: number) => Promise<{ resolved: boolean }>) | null = null;
+  /** Get triage status for a topic — returns null if no active triage, or status summary */
+  public onGetTriageStatus: ((topicId: number) => { active: boolean; classification?: string; checkCount: number; lastCheck?: string } | null) | null = null;
 
   // Unknown user handling callbacks (Multi-User Setup Wizard Phase 4.5)
   // Returns the registration policy and optional contact hint for the gated message
@@ -2299,6 +2301,27 @@ export class TelegramAdapter implements MessagingAdapter {
       return true;
     }
 
+    // /triage — show triage status for this topic
+    if (cmd === '/triage') {
+      if (!this.onGetTriageStatus) {
+        await this.sendToTopic(topicId, 'Triage system not available.').catch(() => {});
+        return true;
+      }
+      const status = this.onGetTriageStatus(topicId);
+      if (!status || !status.active) {
+        await this.sendToTopic(topicId, '🔍 No active triage for this topic. Session appears to be operating normally.').catch(() => {});
+      } else {
+        const lines = [
+          `🔍 Active triage for this topic:`,
+          `Classification: ${status.classification || 'pending'}`,
+          `Checks: ${status.checkCount}`,
+          status.lastCheck ? `Last check: ${status.lastCheck}` : '',
+        ].filter(Boolean);
+        await this.sendToTopic(topicId, lines.join('\n')).catch(() => {});
+      }
+      return true;
+    }
+
     // /switch-account (or /sa) <target> — switch active Claude account
     const switchMatch = text.match(/^\/(?:switch[-_]?account|sa)\s+(.+)$/i);
     if (switchMatch) {
@@ -2950,24 +2973,25 @@ export class TelegramAdapter implements MessagingAdapter {
             if (this.onSentinelKillSession) {
               this.onSentinelKillSession(sessionName);
             }
-            // Sanitize reason — never dump raw LLM responses to the user
-            const stopReason = classification.reason && !classification.reason.includes('unparseable')
-              ? `Reason: ${classification.reason}`
-              : 'Emergency stop signal detected.';
+            // Never include raw sentinel reasons in user-facing messages.
+            // Log the full reason server-side, show only clean messages to users.
+            if (classification.reason) {
+              console.log(`[sentinel] Stop reason: ${classification.reason}`);
+            }
             await this.sendToTopic(numericTopicId,
-              `Session terminated. ${stopReason}\n\nSend a new message to start a fresh session.`
+              `Session terminated.\n\nSend a new message to start a fresh session.`
             ).catch(() => {});
           } else if (classification.category === 'pause' && sessionName) {
             console.log(`[sentinel] Pause for session "${sessionName}" in topic ${numericTopicId}`);
             if (this.onSentinelPauseSession) {
               this.onSentinelPauseSession(sessionName);
             }
-            // Sanitize reason — never dump raw LLM responses to the user
-            const pauseReason = classification.reason && !classification.reason.includes('unparseable')
-              ? classification.reason
-              : 'Pause signal detected.';
+            // Never include raw sentinel reasons in user-facing messages.
+            if (classification.reason) {
+              console.log(`[sentinel] Pause reason: ${classification.reason}`);
+            }
             await this.sendToTopic(numericTopicId,
-              `Session paused. ${pauseReason}\n\nSend a message to resume.`
+              `Session paused.\n\nSend a message to resume.`
             ).catch(() => {});
           } else if (!sessionName) {
             // No active session — just acknowledge the stop/pause signal
