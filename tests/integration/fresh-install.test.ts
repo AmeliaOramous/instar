@@ -91,7 +91,7 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(config.projectName).toBe('test-agent');
     expect(config.port).toBe(4444);
     expect(config.authToken).toBeTruthy();
-    expect(config.sessions.maxSessions).toBe(3);
+    expect(config.sessions.maxSessions).toBe(10);
     expect(config.scheduler.enabled).toBe(true); // Enabled by default for fresh
     expect(config.relationships.maxRecentInteractions).toBe(20);
     expect(config.updates).toBeDefined();
