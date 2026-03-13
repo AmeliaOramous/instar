@@ -22,6 +22,8 @@ import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { HeartbeatManager } from '../core/HeartbeatManager.js';
 import { SecretStore } from '../core/SecretStore.js';
 import { GitSyncManager } from '../core/GitSync.js';
+import { SelfKnowledgeTree } from '../knowledge/SelfKnowledgeTree.js';
+import { CoverageAuditor } from '../knowledge/CoverageAuditor.js';
 import type { MachineRole } from '../core/types.js';
 
 // ── instar machines ──────────────────────────────────────────────
@@ -727,6 +729,57 @@ export async function doctor(options: DoctorOptions): Promise<void> {
     }
   } else {
     checks.push({ name: 'Gitignore', status: 'warn', detail: 'No .gitignore found' });
+  }
+
+  // 9. Self-knowledge tree
+  try {
+    const tree = new SelfKnowledgeTree({
+      projectDir: config.projectDir,
+      stateDir: config.stateDir,
+      intelligence: null,
+    });
+    const treeConfig = tree.getConfig();
+    if (treeConfig) {
+      const validation = tree.validate();
+      const auditor = new CoverageAuditor(config.projectDir, config.stateDir);
+      const health = auditor.healthSummary();
+      const totalNodes = treeConfig.layers.reduce((s: number, l: { children: unknown[] }) => s + l.children.length, 0);
+
+      const parts = [
+        `${totalNodes} nodes`,
+        `${Math.round(validation.coverageScore * 100)}% coverage`,
+      ];
+      if (health.searchCount > 0) {
+        parts.push(`${Math.round(health.cacheHitRate * 100)}% cache hit`);
+        parts.push(`${Math.round(health.avgLatencyMs)}ms avg`);
+        if (health.errorRate > 0) {
+          parts.push(`${(health.errorRate * 100).toFixed(1)}% error rate`);
+        }
+      }
+
+      const hasErrors = validation.errors.length > 0;
+      const hasWarnings = validation.warnings.length > 0;
+      checks.push({
+        name: 'Self-knowledge tree',
+        status: hasErrors ? 'fail' : hasWarnings ? 'warn' : 'ok',
+        detail: parts.join(', '),
+      });
+
+      // Report gaps
+      const detectedPlatforms = auditor.detectPlatforms();
+      const audit = auditor.audit(treeConfig, validation, detectedPlatforms);
+      for (const gap of audit.gaps) {
+        checks.push({
+          name: 'Tree coverage gap',
+          status: gap.severity === 'high' ? 'fail' : 'warn',
+          detail: gap.description,
+        });
+      }
+    } else {
+      checks.push({ name: 'Self-knowledge tree', status: 'warn', detail: 'No tree found. Will be generated on next update.' });
+    }
+  } catch (e) {
+    checks.push({ name: 'Self-knowledge tree', status: 'warn', detail: e instanceof Error ? e.message : String(e) });
   }
 
   // Print results

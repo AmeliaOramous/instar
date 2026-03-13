@@ -370,6 +370,25 @@ node_modules/
     // Git not available — that's fine
   }
 
+  // Generate self-knowledge tree from AGENT.md
+  try {
+    const { TreeGenerator } = await import('../knowledge/TreeGenerator.js');
+    const treeGenerator = new TreeGenerator();
+    const treeConfig = treeGenerator.generate({
+      projectDir,
+      stateDir,
+      agentName: projectName,
+      hasMemory: true,
+      hasJobs: true,
+      hasDecisionJournal: true,
+    });
+    treeGenerator.save(treeConfig, stateDir);
+    const totalNodes = treeConfig.layers.reduce((sum, l) => sum + l.children.length, 0);
+    console.log(`  ${pc.green('✓')} Created self-knowledge tree (${treeConfig.layers.length} layers, ${totalNodes} nodes)`);
+  } catch {
+    // Non-critical — tree can be generated later via doctor
+  }
+
   // Record current version so first server start doesn't dump all historical upgrade guides
   const freshVersionFile = path.join(stateDir, 'state', 'last-migrated-version.json');
   const freshVersionDir = path.dirname(freshVersionFile);
@@ -670,6 +689,30 @@ async function initExistingProject(options: InitOptions): Promise<void> {
       fs.appendFileSync(claudeMdPath, getAgencyPrinciples(projectName, undefined));
       console.log(pc.green('  Updated:') + ' CLAUDE.md (added agency principles)');
     }
+  }
+
+  // Generate self-knowledge tree if it doesn't exist
+  const treeFilePath = path.join(stateDir, 'self-knowledge-tree.json');
+  if (!fs.existsSync(treeFilePath)) {
+    try {
+      const { TreeGenerator } = await import('../knowledge/TreeGenerator.js');
+      const treeGenerator = new TreeGenerator();
+      const treeConfig = treeGenerator.generate({
+        projectDir,
+        stateDir,
+        agentName: projectName,
+        hasMemory: true,
+        hasJobs: true,
+        hasDecisionJournal: true,
+      });
+      treeGenerator.save(treeConfig, stateDir);
+      const totalNodes = treeConfig.layers.reduce((sum, l) => sum + l.children.length, 0);
+      console.log(pc.green('  Created:') + ` self-knowledge tree (${treeConfig.layers.length} layers, ${totalNodes} nodes)`);
+    } catch {
+      // Non-critical — tree can be generated later
+    }
+  } else {
+    console.log(pc.dim('  Exists:') + ' self-knowledge tree (preserved)');
   }
 
   // Record current version so first server start doesn't dump all historical upgrade guides

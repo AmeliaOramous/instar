@@ -20,6 +20,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { TreeGenerator } from '../knowledge/TreeGenerator.js';
 
 export interface MigrationResult {
   /** What was upgraded */
@@ -62,6 +63,7 @@ export class PostUpdateMigrator {
     this.migrateSettings(result);
     this.migrateConfig(result);
     this.migrateGitignore(result);
+    this.migrateSelfKnowledgeTree(result);
 
     return result;
   }
@@ -919,6 +921,47 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Fix gitignore entries that shouldn't exclude shared state.
    * Removes relationships/ from gitignore so multi-machine agents share awareness.
    */
+  /**
+   * Generate self-knowledge tree for agents that don't have one.
+   * Uses managed/unmanaged merge if one already exists.
+   */
+  private migrateSelfKnowledgeTree(result: MigrationResult): void {
+    const treeFilePath = path.join(this.config.stateDir, 'self-knowledge-tree.json');
+
+    try {
+      const generator = new TreeGenerator();
+
+      if (fs.existsSync(treeFilePath)) {
+        // Tree exists — regenerate managed nodes only (preserves unmanaged)
+        const config = generator.generate({
+          projectDir: this.config.projectDir,
+          stateDir: this.config.stateDir,
+          agentName: this.config.projectName || path.basename(this.config.projectDir),
+          hasMemory: true,
+          hasJobs: true,
+          hasDecisionJournal: true,
+        });
+        generator.save(config, this.config.stateDir);
+        result.upgraded.push('self-knowledge tree: refreshed managed nodes');
+      } else {
+        // No tree — generate from scratch
+        const config = generator.generate({
+          projectDir: this.config.projectDir,
+          stateDir: this.config.stateDir,
+          agentName: this.config.projectName || path.basename(this.config.projectDir),
+          hasMemory: true,
+          hasJobs: true,
+          hasDecisionJournal: true,
+        });
+        generator.save(config, this.config.stateDir);
+        const totalNodes = config.layers.reduce((sum: number, l: { children: unknown[] }) => sum + l.children.length, 0);
+        result.upgraded.push(`self-knowledge tree: created (${config.layers.length} layers, ${totalNodes} nodes)`);
+      }
+    } catch (err) {
+      result.errors.push(`self-knowledge tree: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private migrateGitignore(result: MigrationResult): void {
     // Fix project-level .gitignore
     const projectGitignore = path.join(this.config.projectDir, '.gitignore');

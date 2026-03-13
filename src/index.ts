@@ -437,6 +437,35 @@ export type {
 export { KnowledgeManager } from './knowledge/KnowledgeManager.js';
 export type { KnowledgeSource, KnowledgeCatalog, IngestOptions, IngestResult } from './knowledge/KnowledgeManager.js';
 
+// Self-Knowledge Tree
+export { SelfKnowledgeTree } from './knowledge/SelfKnowledgeTree.js';
+export type { SelfKnowledgeTreeOptions } from './knowledge/SelfKnowledgeTree.js';
+export { TreeGenerator } from './knowledge/TreeGenerator.js';
+export { TreeTriage } from './knowledge/TreeTriage.js';
+export { TreeTraversal } from './knowledge/TreeTraversal.js';
+export type { TraversalDependencies } from './knowledge/TreeTraversal.js';
+export { TreeSynthesis } from './knowledge/TreeSynthesis.js';
+export { ProbeRegistry, ProbeExecutionError, ProbeTimeoutError } from './knowledge/ProbeRegistry.js';
+export { CoverageAuditor } from './knowledge/CoverageAuditor.js';
+export type { CoverageGap, AuditResult, HealthSummary } from './knowledge/CoverageAuditor.js';
+export type {
+  SelfKnowledgeTreeConfig,
+  SelfKnowledgeLayer,
+  SelfKnowledgeNode,
+  SelfKnowledgeSource,
+  SelfKnowledgeResult,
+  SelfKnowledgeFragment,
+  SearchOptions,
+  SearchPlan,
+  GroundingResult,
+  TriageResult as TreeTriageResult,
+  TreeTraceEntry,
+  ValidationResult as TreeValidationResult,
+  CacheStats,
+  ProbeFn,
+  ProbeResult,
+} from './knowledge/types.js';
+
 // Publishing
 export { TelegraphService, markdownToNodes, parseInline } from './publishing/TelegraphService.js';
 export type { TelegraphConfig, TelegraphNode, TelegraphElement, TelegraphPage, PublishedPage } from './publishing/TelegraphService.js';

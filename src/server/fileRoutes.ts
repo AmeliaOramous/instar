@@ -1,10 +1,12 @@
 /**
- * File viewer API routes — read-only file browsing for the dashboard.
+ * File viewer API routes for the dashboard.
  *
  * Phase 1: List directories and read files within allowed paths.
+ * Phase 2: Inline editing with optimistic concurrency and audit logging.
+ *
  * All paths are relative to the project root. Security is defense-in-depth:
  * normalize, reject absolute, reject .., check allowedPaths, symlink resolution,
- * blocked filenames.
+ * blocked filenames, never-editable enforcement.
  */
 
 import { Router, type Request, type Response } from 'express';
@@ -164,6 +166,42 @@ function isEditable(relativePath: string, config: FileViewerConfig): boolean {
     return normalized === normalizedEditable ||
            normalized.startsWith(normalizedEditable.endsWith('/') ? normalizedEditable : normalizedEditable + '/');
   });
+}
+
+// ── Never-editable paths (security invariant) ────────────────────────
+
+/**
+ * Paths that are NEVER editable regardless of config.
+ * A PIN compromise must never result in arbitrary code execution.
+ */
+const NEVER_EDITABLE_PREFIXES = [
+  '.claude/hooks/',
+  '.claude/scripts/',
+  'node_modules/',
+];
+
+function isNeverEditable(relativePath: string): boolean {
+  const normalized = path.normalize(relativePath);
+  return NEVER_EDITABLE_PREFIXES.some(prefix =>
+    normalized.startsWith(prefix) || normalized === prefix.replace(/\/$/, ''),
+  );
+}
+
+// ── Audit log ────────────────────────────────────────────────────────
+
+async function appendAuditLog(
+  projectDir: string,
+  entry: { operation: string; path: string; sourceIp: string; size: number; success: boolean },
+): Promise<void> {
+  const logDir = path.join(projectDir, '.instar');
+  const logPath = path.join(logDir, 'file-viewer-audit.jsonl');
+  try {
+    await fs.promises.mkdir(logDir, { recursive: true });
+    const line = JSON.stringify({ timestamp: new Date().toISOString(), ...entry }) + '\n';
+    await fs.promises.appendFile(logPath, line);
+  } catch {
+    // Audit log failure must not block the save operation
+  }
 }
 
 // ── Route factory ────────────────────────────────────────────────────
@@ -356,6 +394,165 @@ export function createFileRoutes(options: { config: InstarConfig }): Router {
     }
   });
 
+  // ── POST /api/files/save ─────────────────────────────────────
+
+  router.post('/api/files/save', async (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+
+    // CSRF protection: require custom header
+    if (req.headers['x-instar-request'] !== '1') {
+      res.status(403).json({ error: 'Missing CSRF header' });
+      return;
+    }
+
+    const { path: requestedPath, content, expectedModified } = req.body || {};
+    const sourceIp = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || 'unknown';
+
+    if (typeof requestedPath !== 'string' || !requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    if (typeof content !== 'string') {
+      res.status(400).json({ error: 'Missing content parameter' });
+      return;
+    }
+
+    // Check content size against editable limit
+    const contentSize = Buffer.byteLength(content, 'utf-8');
+    if (contentSize > config.maxEditableFileSize) {
+      res.status(413).json({
+        error: 'Content too large for editing',
+        size: contentSize,
+        maxSize: config.maxEditableFileSize,
+      });
+      return;
+    }
+
+    // Validate path (same 6-layer defense as read)
+    const validation = await validatePath(requestedPath, projectDir, config);
+    if (!validation.valid) {
+      res.status(validation.status || 403).json({ error: validation.error });
+      return;
+    }
+
+    // Check blocked filenames
+    const blocked = checkBlockedFilename(requestedPath, config);
+    if (blocked) {
+      res.status(403).json({ error: blocked });
+      return;
+    }
+
+    // Never-editable enforcement (security invariant)
+    if (isNeverEditable(requestedPath)) {
+      res.status(403).json({ error: 'This path is never editable for security reasons' });
+      return;
+    }
+
+    // Editable path check
+    if (!isEditable(requestedPath, config)) {
+      res.status(403).json({ error: 'This file is not in an editable path' });
+      return;
+    }
+
+    const absPath = validation.resolvedPath!;
+
+    try {
+      const stat = await fs.promises.stat(absPath);
+
+      if (stat.isDirectory()) {
+        res.status(400).json({ error: 'Cannot write to a directory' });
+        return;
+      }
+
+      // Binary check
+      if (isBinaryFile(absPath)) {
+        res.status(400).json({ error: 'Cannot edit binary files' });
+        return;
+      }
+
+      // Optimistic concurrency: check if file was modified since client loaded it
+      if (typeof expectedModified === 'string') {
+        const currentModified = stat.mtime.toISOString();
+        if (currentModified !== expectedModified) {
+          await appendAuditLog(projectDir, {
+            operation: 'write_conflict',
+            path: requestedPath,
+            sourceIp,
+            size: contentSize,
+            success: false,
+          });
+          res.status(409).json({
+            error: 'File was modified since you loaded it',
+            currentModified,
+            expectedModified,
+          });
+          return;
+        }
+      }
+
+      // Write the file
+      await fs.promises.writeFile(absPath, content, 'utf-8');
+
+      // Get updated stats
+      const newStat = await fs.promises.stat(absPath);
+
+      await appendAuditLog(projectDir, {
+        operation: 'write',
+        path: requestedPath,
+        sourceIp,
+        size: contentSize,
+        success: true,
+      });
+
+      res.json({
+        path: path.normalize(requestedPath),
+        size: newStat.size,
+        modified: newStat.mtime.toISOString(),
+        success: true,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // File was deleted between validation and write — create it
+        try {
+          await fs.promises.writeFile(absPath, content, 'utf-8');
+          const newStat = await fs.promises.stat(absPath);
+          await appendAuditLog(projectDir, {
+            operation: 'create',
+            path: requestedPath,
+            sourceIp,
+            size: contentSize,
+            success: true,
+          });
+          res.json({
+            path: path.normalize(requestedPath),
+            size: newStat.size,
+            modified: newStat.mtime.toISOString(),
+            success: true,
+          });
+        } catch {
+          await appendAuditLog(projectDir, {
+            operation: 'write',
+            path: requestedPath,
+            sourceIp,
+            size: contentSize,
+            success: false,
+          });
+          res.status(500).json({ error: 'Failed to save file' });
+        }
+        return;
+      }
+      await appendAuditLog(projectDir, {
+        operation: 'write',
+        path: requestedPath,
+        sourceIp,
+        size: contentSize,
+        success: false,
+      });
+      res.status(500).json({ error: 'Failed to save file' });
+    }
+  });
+
   // ── GET /api/files/config ──────────────────────────────────────
 
   router.get('/api/files/config', (_req: Request, res: Response) => {
@@ -365,6 +562,7 @@ export function createFileRoutes(options: { config: InstarConfig }): Router {
       allowedPaths: config.allowedPaths,
       editablePaths: config.editablePaths,
       maxFileSize: config.maxFileSize,
+      maxEditableFileSize: config.maxEditableFileSize,
     });
   });
 

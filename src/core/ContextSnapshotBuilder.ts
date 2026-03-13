@@ -87,6 +87,7 @@ export class ContextSnapshotBuilder {
       recentDecisions: this.buildRecentDecisions(),
       autonomyLevel: this.readAutonomyLevel(),
       appliedDispatchSummary: this.buildAppliedDispatchSummary(),
+      selfKnowledge: this.readSelfKnowledgeMetadata(),
       generatedAt: new Date().toISOString(),
     };
 
@@ -357,5 +358,46 @@ export class ContextSnapshotBuilder {
       return intentMatch[1].trim();
     }
     return undefined;
+  }
+
+  /**
+   * Read self-knowledge tree metadata if available.
+   */
+  private readSelfKnowledgeMetadata(): AgentContextSnapshot['selfKnowledge'] {
+    const treePath = path.join(this.sources.stateDir, 'self-knowledge-tree.json');
+    if (!fs.existsSync(treePath)) return undefined;
+
+    try {
+      const data = JSON.parse(fs.readFileSync(treePath, 'utf-8'));
+      const totalNodes = (data.layers || []).reduce(
+        (sum: number, l: { children?: unknown[] }) => sum + (l.children?.length ?? 0),
+        0,
+      );
+
+      // Check for last search in trace log
+      let lastSearchQuery: string | undefined;
+      let lastSearchTimestamp: string | undefined;
+      const tracePath = path.join(this.sources.stateDir, 'logs', 'tree-trace.jsonl');
+      if (fs.existsSync(tracePath)) {
+        try {
+          const lines = fs.readFileSync(tracePath, 'utf-8').trim().split('\n');
+          if (lines.length > 0) {
+            const last = JSON.parse(lines[lines.length - 1]);
+            lastSearchQuery = last.query;
+            lastSearchTimestamp = last.timestamp;
+          }
+        } catch { /* @silent-fallback-ok — trace log optional */ }
+      }
+
+      return {
+        treeVersion: data.version || '1.0',
+        totalNodes,
+        lastSearchQuery,
+        lastSearchTimestamp,
+      };
+    } catch {
+      // @silent-fallback-ok — optional snapshot, undefined is safe fallback
+      return undefined;
+    }
   }
 }

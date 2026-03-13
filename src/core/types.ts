@@ -1007,6 +1007,13 @@ export interface AgentContextSnapshot {
   autonomyLevel: AutonomyProfileLevel;
   /** Count and types of already-applied dispatches */
   appliedDispatchSummary: { count: number; byType: Record<string, number> };
+  /** Self-knowledge tree metadata (if tree is configured) */
+  selfKnowledge?: {
+    treeVersion: string;
+    totalNodes: number;
+    lastSearchQuery?: string;
+    lastSearchTimestamp?: string;
+  };
   /** Snapshot generation timestamp */
   generatedAt: string;
 }

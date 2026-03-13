@@ -914,6 +914,179 @@
 
     .files-back-btn:hover { background: var(--bg-hover); }
 
+    /* ── Editor mode (Phase 2) ───────────────────────────────── */
+    .file-editor {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    .file-editor textarea {
+      flex: 1;
+      width: 100%;
+      border: none;
+      background: #0d0d0d;
+      color: var(--text);
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+      font-size: 14px;
+      line-height: 1.5;
+      padding: 16px;
+      resize: none;
+      outline: none;
+      tab-size: 2;
+      box-sizing: border-box;
+    }
+
+    /* iOS zoom prevention: 16px minimum */
+    @supports (-webkit-touch-callout: none) {
+      .file-editor textarea { font-size: 16px; }
+    }
+
+    .editor-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-panel);
+      flex-shrink: 0;
+    }
+
+    .editor-toolbar .btn {
+      padding: 6px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      min-height: 36px;
+    }
+
+    .editor-toolbar .btn-save {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+    }
+
+    .editor-toolbar .btn-save:hover { opacity: 0.9; }
+
+    .editor-toolbar .btn-cancel {
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .editor-toolbar .btn-cancel:hover { background: var(--bg-hover); }
+
+    .editor-toolbar .shortcut-hint {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-left: auto;
+    }
+
+    .editor-toolbar .save-status {
+      font-size: 12px;
+      margin-left: 8px;
+    }
+
+    .editor-toolbar .save-status.saving { color: var(--text-dim); }
+    .editor-toolbar .save-status.saved { color: var(--accent); }
+    .editor-toolbar .save-status.error { color: var(--red); }
+
+    /* Toast notifications */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .toast {
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #fff;
+      animation: toastIn 0.2s ease-out;
+      max-width: 360px;
+    }
+
+    .toast.success { background: #166534; border: 1px solid #22c55e; }
+    .toast.error { background: #7f1d1d; border: 1px solid #ef4444; }
+    .toast.warning { background: #713f12; border: 1px solid #eab308; }
+
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Conflict dialog */
+    .conflict-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .conflict-dialog {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      max-width: 400px;
+      width: 90%;
+    }
+
+    .conflict-dialog h3 {
+      color: #eab308;
+      margin: 0 0 12px;
+      font-size: 16px;
+    }
+
+    .conflict-dialog p {
+      color: var(--text-dim);
+      font-size: 13px;
+      margin: 0 0 16px;
+      line-height: 1.5;
+    }
+
+    .conflict-dialog .conflict-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .conflict-dialog .conflict-actions .btn {
+      padding: 8px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+      cursor: pointer;
+      min-height: 36px;
+    }
+
+    .conflict-dialog .btn-overwrite {
+      background: #7f1d1d;
+      color: #fff;
+      border-color: #ef4444;
+    }
+
+    .conflict-dialog .btn-reload {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+    }
+
+    .conflict-dialog .btn-dismiss {
+      background: var(--bg);
+      color: var(--text);
+    }
+
     /* ── Mobile responsive ─────────────────────────────────── */
     @media (max-width: 768px) {
       .app {
@@ -1083,6 +1256,21 @@
       .file-content-body .code-content {
         font-size: 12px;
       }
+
+      /* Editor mobile */
+      .editor-toolbar {
+        padding: 8px 12px;
+        flex-wrap: wrap;
+      }
+
+      .editor-toolbar .shortcut-hint {
+        display: none;
+      }
+
+      .editor-toolbar .btn {
+        min-height: 44px;
+        padding: 10px 16px;
+      }
     }
   </style>
 </head>
@@ -1188,6 +1376,22 @@
             <p>Select a file to view its contents</p>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notifications -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Conflict resolution dialog -->
+  <div class="conflict-overlay" id="conflictOverlay" style="display:none">
+    <div class="conflict-dialog">
+      <h3>File Modified Externally</h3>
+      <p id="conflictMessage">This file was modified by another process since you started editing.</p>
+      <div class="conflict-actions">
+        <button class="btn btn-overwrite" onclick="handleConflictOverwrite()">Overwrite</button>
+        <button class="btn btn-reload" onclick="handleConflictReload()">Reload</button>
+        <button class="btn btn-dismiss" onclick="hideConflictDialog()">Cancel</button>
       </div>
     </div>
   </div>
@@ -1829,6 +2033,10 @@
     let currentFilePath = '';
     let fileTreeCache = new Map(); // path -> entries
     let expandedDirs = new Set();
+    let isEditing = false;
+    let editOriginalContent = '';
+    let editModifiedTimestamp = '';  // for optimistic concurrency
+    let hasUnsavedChanges = false;
 
     const FILE_ICONS = {
       directory: '\uD83D\uDCC1', // folder
@@ -1982,6 +2190,12 @@
     }
 
     async function openFile(filePath) {
+      // Guard: check unsaved changes before navigating away
+      if (hasUnsavedChanges && !confirm('You have unsaved changes. Discard them?')) {
+        return;
+      }
+      exitEditMode(true); // silent exit, no confirm
+
       currentFilePath = filePath;
       const app = document.getElementById('app');
       app.classList.add('files-active');
@@ -2008,12 +2222,15 @@
         if (data.binary) {
           body.innerHTML = `<div class="file-empty"><div class="icon">&#x1F4E6;</div><p>Binary file (${formatFileSize(data.size)})<br>Preview not available</p></div>`;
           updateFileBadges(false);
+          editModifiedTimestamp = '';
           updateFileUrl();
           return;
         }
 
         const content = data.content || '';
         const filename = filePath.split('/').pop() || '';
+        editModifiedTimestamp = data.modified || '';
+        editOriginalContent = content;
 
         // Render based on file type
         if (filename.endsWith('.md')) {
@@ -2082,13 +2299,32 @@
       badge.textContent = editable ? 'Editable' : 'Read-only';
       badges.appendChild(badge);
 
+      // Edit button (only for editable files, hidden during edit mode)
+      if (editable && !isEditing) {
+        const editBtn = document.createElement('button');
+        editBtn.className = 'file-badge copy-btn';
+        editBtn.textContent = 'Edit';
+        editBtn.onclick = () => enterEditMode();
+        badges.appendChild(editBtn);
+      }
+
       // Copy button
       const copyBtn = document.createElement('button');
       copyBtn.className = 'file-badge copy-btn';
       copyBtn.textContent = 'Copy';
       copyBtn.onclick = () => {
         const body = document.getElementById('fileContentBody');
-        // Get raw text content
+        // Get raw text content — from editor textarea if editing, otherwise from rendered view
+        if (isEditing) {
+          const ta = body.querySelector('.file-editor textarea');
+          if (ta) {
+            navigator.clipboard.writeText(ta.value).then(() => {
+              copyBtn.textContent = 'Copied!';
+              setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+            });
+            return;
+          }
+        }
         const pre = body.querySelector('pre');
         const md = body.querySelector('.markdown-content');
         let text = '';
@@ -2164,6 +2400,12 @@
     }
 
     function filesGoBack() {
+      // Guard: check unsaved changes before navigating away
+      if (hasUnsavedChanges && !confirm('You have unsaved changes. Discard them?')) {
+        return;
+      }
+      exitEditMode(true); // silent exit
+
       // Mobile: go back to file tree
       const app = document.getElementById('app');
       app.classList.remove('files-active');
@@ -2179,6 +2421,283 @@
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
       return (bytes / 1048576).toFixed(1) + ' MB';
+    }
+
+    // ── Editor (Phase 2) ──────────────────────────────────────
+
+    function enterEditMode() {
+      if (isEditing || !currentFilePath) return;
+      isEditing = true;
+      hasUnsavedChanges = false;
+
+      const body = document.getElementById('fileContentBody');
+
+      // Build editor UI
+      const editor = document.createElement('div');
+      editor.className = 'file-editor';
+
+      const toolbar = document.createElement('div');
+      toolbar.className = 'editor-toolbar';
+
+      const saveBtn = document.createElement('button');
+      saveBtn.className = 'btn btn-save';
+      saveBtn.textContent = 'Save';
+      saveBtn.onclick = saveFile;
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'btn btn-cancel';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.onclick = () => exitEditMode();
+
+      const hint = document.createElement('span');
+      hint.className = 'shortcut-hint';
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      hint.textContent = isMac ? '\u2318S to save' : 'Ctrl+S to save';
+
+      const status = document.createElement('span');
+      status.className = 'save-status';
+      status.id = 'saveStatus';
+
+      toolbar.appendChild(saveBtn);
+      toolbar.appendChild(cancelBtn);
+      toolbar.appendChild(hint);
+      toolbar.appendChild(status);
+
+      const textarea = document.createElement('textarea');
+      textarea.value = editOriginalContent;
+      textarea.spellcheck = false;
+      textarea.autocomplete = 'off';
+      textarea.autocapitalize = 'off';
+
+      // Track unsaved changes
+      textarea.addEventListener('input', () => {
+        hasUnsavedChanges = textarea.value !== editOriginalContent;
+      });
+
+      editor.appendChild(toolbar);
+      editor.appendChild(textarea);
+
+      body.innerHTML = '';
+      body.appendChild(editor);
+
+      // Update badges (hides Edit button during editing)
+      updateFileBadges(true);
+
+      // Focus textarea
+      textarea.focus();
+
+      // iOS Safari: adjust for virtual keyboard using visualViewport
+      if (window.visualViewport) {
+        const adjustForKeyboard = () => {
+          const vv = window.visualViewport;
+          const offset = window.innerHeight - vv.height - vv.offsetTop;
+          editor.style.paddingBottom = Math.max(0, offset) + 'px';
+        };
+        window.visualViewport.addEventListener('resize', adjustForKeyboard);
+        window.visualViewport.addEventListener('scroll', adjustForKeyboard);
+        // Clean up when leaving edit mode
+        textarea._vpCleanup = () => {
+          window.visualViewport.removeEventListener('resize', adjustForKeyboard);
+          window.visualViewport.removeEventListener('scroll', adjustForKeyboard);
+        };
+      }
+    }
+
+    function exitEditMode(silent) {
+      if (!isEditing) return;
+      if (!silent && hasUnsavedChanges && !confirm('You have unsaved changes. Discard them?')) {
+        return;
+      }
+
+      // Clean up visualViewport listeners
+      const ta = document.querySelector('.file-editor textarea');
+      if (ta && ta._vpCleanup) ta._vpCleanup();
+
+      isEditing = false;
+      hasUnsavedChanges = false;
+
+      // Re-render the file in view mode
+      if (currentFilePath) {
+        openFile(currentFilePath);
+      }
+    }
+
+    async function saveFile() {
+      if (!isEditing || !currentFilePath) return;
+
+      const textarea = document.querySelector('.file-editor textarea');
+      if (!textarea) return;
+
+      const content = textarea.value;
+      const status = document.getElementById('saveStatus');
+      const saveBtn = document.querySelector('.editor-toolbar .btn-save');
+
+      // Show saving state
+      if (status) { status.textContent = 'Saving...'; status.className = 'save-status saving'; }
+      if (saveBtn) saveBtn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/files/save', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json',
+            'X-Instar-Request': '1',
+          },
+          body: JSON.stringify({
+            path: currentFilePath,
+            content,
+            expectedModified: editModifiedTimestamp,
+          }),
+        });
+
+        const data = await resp.json().catch(() => ({}));
+
+        if (resp.status === 409) {
+          // Conflict — file modified externally
+          showConflictDialog(data.currentModified);
+          if (status) { status.textContent = 'Conflict'; status.className = 'save-status error'; }
+          if (saveBtn) saveBtn.disabled = false;
+          return;
+        }
+
+        if (resp.status === 401) {
+          // Session expired — stash content and re-auth
+          sessionStorage.setItem('instar_edit_stash', JSON.stringify({
+            path: currentFilePath,
+            content,
+            timestamp: Date.now(),
+          }));
+          showToast('Session expired. Please re-authenticate.', 'warning');
+          if (saveBtn) saveBtn.disabled = false;
+          return;
+        }
+
+        if (!resp.ok) {
+          throw new Error(data.error || 'HTTP ' + resp.status);
+        }
+
+        // Success — update baseline
+        editOriginalContent = content;
+        editModifiedTimestamp = data.modified || '';
+        hasUnsavedChanges = false;
+
+        if (status) { status.textContent = 'Saved'; status.className = 'save-status saved'; }
+        showToast('File saved', 'success');
+        setTimeout(() => {
+          if (status && status.textContent === 'Saved') {
+            status.textContent = '';
+            status.className = 'save-status';
+          }
+        }, 3000);
+      } catch (err) {
+        if (status) { status.textContent = 'Error'; status.className = 'save-status error'; }
+        showToast('Save failed: ' + err.message, 'error');
+      } finally {
+        if (saveBtn) saveBtn.disabled = false;
+      }
+    }
+
+    // ── Toast notifications ─────────────────────────────────────
+
+    function showToast(message, type) {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = 'toast ' + (type || 'success');
+      toast.textContent = message;
+      container.appendChild(toast);
+
+      // Auto-dismiss after 4s
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        setTimeout(() => toast.remove(), 300);
+      }, 4000);
+    }
+
+    // ── Conflict resolution ─────────────────────────────────────
+
+    function showConflictDialog(serverModified) {
+      document.getElementById('conflictOverlay').style.display = 'flex';
+      document.getElementById('conflictOverlay').dataset.serverModified = serverModified || '';
+    }
+
+    function hideConflictDialog() {
+      document.getElementById('conflictOverlay').style.display = 'none';
+    }
+
+    function handleConflictOverwrite() {
+      hideConflictDialog();
+      // Clear expectedModified to force overwrite
+      editModifiedTimestamp = '';
+      saveFile();
+    }
+
+    async function handleConflictReload() {
+      hideConflictDialog();
+      // Reload file, discarding local changes
+      hasUnsavedChanges = false;
+      isEditing = false;
+      await openFile(currentFilePath);
+      // Re-enter edit mode with fresh content
+      enterEditMode();
+    }
+
+    // ── Keyboard shortcuts ──────────────────────────────────────
+
+    document.addEventListener('keydown', (e) => {
+      // Cmd/Ctrl+S to save
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        if (isEditing) {
+          e.preventDefault();
+          saveFile();
+        }
+      }
+      // Escape to exit edit mode
+      if (e.key === 'Escape' && isEditing) {
+        e.preventDefault();
+        exitEditMode();
+      }
+    });
+
+    // ── Unsaved-changes guard ───────────────────────────────────
+
+    window.addEventListener('beforeunload', (e) => {
+      if (hasUnsavedChanges) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    // Restore stashed edit after re-auth
+    function restoreEditStash() {
+      const raw = sessionStorage.getItem('instar_edit_stash');
+      if (!raw) return;
+      try {
+        const stash = JSON.parse(raw);
+        // Only restore if recent (< 10 min) and path matches
+        if (Date.now() - stash.timestamp > 600000) {
+          sessionStorage.removeItem('instar_edit_stash');
+          return;
+        }
+        if (stash.path && stash.content) {
+          // Wait for file tree to load, then open + restore
+          const restore = () => {
+            if (!fileTreeLoaded) { setTimeout(restore, 100); return; }
+            openFile(stash.path).then(() => {
+              enterEditMode();
+              const ta = document.querySelector('.file-editor textarea');
+              if (ta) {
+                ta.value = stash.content;
+                hasUnsavedChanges = true;
+              }
+              showToast('Restored unsaved edits from before session timeout', 'warning');
+              sessionStorage.removeItem('instar_edit_stash');
+            });
+          };
+          setTimeout(restore, 200);
+        }
+      } catch { /* ignore bad stash */ }
     }
 
     // ── Deep linking via query params ──────────────────────────
