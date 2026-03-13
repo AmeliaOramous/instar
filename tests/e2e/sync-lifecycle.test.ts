@@ -38,7 +38,7 @@ function git(args: string[], cwd: string): string {
 
 function createGitRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-e2e-'));
-  git(['init'], dir);
+  git(['init', '--initial-branch=main'], dir);
   git(['config', 'user.name', 'Test'], dir);
   git(['config', 'user.email', 'test@test.com'], dir);
 
