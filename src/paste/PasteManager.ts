@@ -513,8 +513,15 @@ export class PasteManager {
     const meta = this.parseFrontmatter(raw);
     if (!meta) return null;
 
-    // Content starts after the closing --- and a blank line
-    const content = lines.slice(endIdx + 2).join('\n');
+    // Content starts after the closing ---
+    // The file format is: frontmatter\n\ncontent (buildFrontmatter ends with ---,
+    // then create() adds \n before content, so there's a blank line)
+    let contentStart = endIdx + 1;
+    // Skip blank line after frontmatter if present
+    if (contentStart < lines.length && lines[contentStart] === '') {
+      contentStart++;
+    }
+    const content = lines.slice(contentStart).join('\n');
     return { meta, content };
   }
 

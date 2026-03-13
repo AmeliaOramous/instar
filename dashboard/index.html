@@ -246,6 +246,190 @@
     .empty-state .icon { font-size: 32px; margin-bottom: 12px; opacity: 0.5; }
     .empty-state p { font-size: 13px; line-height: 1.5; }
 
+    /* Drop Zone */
+    .dropzone-container {
+      display: flex;
+      justify-content: center;
+      padding: 24px;
+      overflow-y: auto;
+      height: calc(100vh - 56px);
+    }
+    .dropzone-panel {
+      width: 100%;
+      max-width: 720px;
+    }
+    .dropzone-header h2 {
+      color: var(--text-bright);
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+    .dropzone-subtitle {
+      color: var(--text-dim);
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+    .dropzone-form {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .dropzone-label {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 14px;
+      outline: none;
+    }
+    .dropzone-label:focus { border-color: var(--accent); }
+    .dropzone-textarea-wrap {
+      position: relative;
+    }
+    .dropzone-textarea {
+      width: 100%;
+      min-height: 200px;
+      max-height: 60vh;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+      color: var(--text);
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      resize: vertical;
+      outline: none;
+      box-sizing: border-box;
+    }
+    .dropzone-textarea:focus { border-color: var(--accent); }
+    .dropzone-count {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
+      font-size: 11px;
+      color: var(--text-dim);
+      pointer-events: none;
+    }
+    .dropzone-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .dropzone-session-select {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--text);
+      font-size: 13px;
+      outline: none;
+    }
+    .dropzone-send-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 24px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .dropzone-send-btn:hover { background: #4fa0d8; }
+    .dropzone-send-btn:disabled { background: #555; cursor: not-allowed; }
+    .dropzone-disclosure {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-style: italic;
+    }
+    .dropzone-status {
+      margin-top: 12px;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .dropzone-status.success {
+      background: rgba(46, 160, 67, 0.15);
+      color: #3fb950;
+      border: 1px solid rgba(46, 160, 67, 0.3);
+    }
+    .dropzone-status.error {
+      background: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border: 1px solid rgba(248, 81, 73, 0.3);
+    }
+    .dropzone-status.queued {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.3);
+    }
+    .dropzone-history {
+      margin-top: 28px;
+    }
+    .dropzone-history h3 {
+      color: var(--text-bright);
+      font-size: 15px;
+      margin-bottom: 12px;
+    }
+    .dropzone-history-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .dropzone-empty {
+      color: var(--text-dim);
+      font-size: 13px;
+      font-style: italic;
+    }
+    .dz-paste-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+    }
+    .dz-paste-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .dz-paste-label {
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .dz-paste-meta {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+    .dz-paste-status {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-weight: 500;
+    }
+    .dz-paste-status.written { background: rgba(210, 153, 34, 0.2); color: #d29922; }
+    .dz-paste-status.notified { background: rgba(46, 160, 67, 0.2); color: #3fb950; }
+    .dz-paste-status.acknowledged { background: rgba(56, 132, 255, 0.2); color: #58a6ff; }
+    .dz-paste-delete {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 4px 8px;
+    }
+    .dz-paste-delete:hover { color: #f85149; }
+    @media (max-width: 768px) {
+      .dropzone-container { padding: 16px; }
+      .dropzone-actions { flex-direction: column; }
+      .dropzone-session-select { width: 100%; }
+    }
+
     /* WhatsApp QR panel */
     .wa-qr-panel {
       position: fixed;
@@ -2051,17 +2235,27 @@
       const sessionsTab = document.getElementById('sessionsTab');
       const mainPanel = document.getElementById('mainPanel');
       const filesTab = document.getElementById('filesTab');
+      const dropzoneTab = document.getElementById('dropzoneTab');
+
+      sessionsTab.style.display = 'none';
+      mainPanel.style.display = 'none';
+      filesTab.style.display = 'none';
+      dropzoneTab.style.display = 'none';
 
       if (tabName === 'sessions') {
         sessionsTab.style.display = '';
         mainPanel.style.display = '';
-        filesTab.style.display = 'none';
       } else if (tabName === 'files') {
-        sessionsTab.style.display = 'none';
-        mainPanel.style.display = 'none';
         filesTab.style.display = 'flex';
         // Load file tree on first switch
         if (!fileTreeLoaded) loadFileTree();
+      } else if (tabName === 'dropzone') {
+        dropzoneTab.style.display = 'flex';
+        // Auto-focus textarea
+        setTimeout(() => document.getElementById('dzContent')?.focus(), 100);
+        // Load session list and paste history
+        loadDzSessions();
+        loadDzHistory();
       }
 
       // Update URL
@@ -2799,6 +2993,169 @@
     deepLinkObserver.observe(document.getElementById('authOverlay'), {
       attributes: true, attributeFilter: ['style'],
     });
+
+    // ── Drop Zone ──────────────────────────────────────────────
+
+    function updateDzCount() {
+      const content = document.getElementById('dzContent').value;
+      const chars = content.length;
+      // Rough token estimate: ~4 chars per token for English
+      const tokens = Math.round(chars / 4);
+      document.getElementById('dzCount').textContent =
+        `${chars.toLocaleString()} chars \u00b7 ~${tokens.toLocaleString()} tokens`;
+    }
+
+    async function loadDzSessions() {
+      const select = document.getElementById('dzSession');
+      // Keep the first "Auto" option, remove the rest
+      while (select.options.length > 1) select.remove(1);
+
+      // Use the cached session list from WebSocket if available
+      if (sessions && sessions.length > 0) {
+        const interactive = sessions.filter(s => !s.jobSlug);
+        for (const s of interactive) {
+          const opt = document.createElement('option');
+          opt.value = s.name;
+          opt.textContent = s.name + (s.model ? ` (${s.model})` : '');
+          select.appendChild(opt);
+        }
+      }
+    }
+
+    async function loadDzHistory() {
+      try {
+        const resp = await fetch('/pastes', {
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        renderDzHistory(data.pastes || []);
+      } catch {}
+    }
+
+    function renderDzHistory(pastes) {
+      const list = document.getElementById('dzHistoryList');
+      if (!pastes.length) {
+        list.innerHTML = '<div class="dropzone-empty">No pastes yet</div>';
+        return;
+      }
+      list.innerHTML = pastes.slice(0, 20).map(p => {
+        const age = timeAgo(new Date(p.timestamp));
+        const label = p.label || '(unlabeled)';
+        const chars = p.contentLength.toLocaleString();
+        return `
+          <div class="dz-paste-item" data-paste-id="${esc(p.pasteId)}">
+            <div class="dz-paste-info">
+              <span class="dz-paste-label">${esc(label)}</span>
+              <span class="dz-paste-meta">${chars} chars &middot; ${age}</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="dz-paste-status ${p.status}">${p.status}</span>
+              <button class="dz-paste-delete" onclick="deletePaste('${esc(p.pasteId)}')" title="Delete">&times;</button>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    async function sendPaste() {
+      const content = document.getElementById('dzContent').value.trim();
+      if (!content) return;
+
+      const label = document.getElementById('dzLabel').value.trim() || undefined;
+      const targetSession = document.getElementById('dzSession').value || undefined;
+      const btn = document.getElementById('dzSendBtn');
+      const status = document.getElementById('dzStatus');
+
+      btn.disabled = true;
+      btn.textContent = 'Sending...';
+      status.style.display = 'none';
+
+      try {
+        const resp = await fetch('/pastes', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ content, label, targetSession }),
+        });
+
+        const data = await resp.json();
+
+        if (resp.ok && data.ok) {
+          const chars = data.contentLength?.toLocaleString() || content.length.toLocaleString();
+          if (data.status === 'notified') {
+            status.className = 'dropzone-status success';
+            status.textContent = `Sent ${chars} chars to session "${data.sessionName}"`;
+          } else {
+            status.className = 'dropzone-status queued';
+            status.textContent = `Queued ${chars} chars \u2014 will be delivered when a session starts.`;
+          }
+          status.style.display = 'block';
+
+          // Clear form
+          document.getElementById('dzContent').value = '';
+          document.getElementById('dzLabel').value = '';
+          updateDzCount();
+
+          // Refresh history
+          loadDzHistory();
+        } else {
+          status.className = 'dropzone-status error';
+          status.textContent = data.message || data.error || 'Failed to send paste';
+          status.style.display = 'block';
+        }
+      } catch (err) {
+        status.className = 'dropzone-status error';
+        status.textContent = 'Network error: ' + err.message;
+        status.style.display = 'block';
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Send';
+    }
+
+    async function deletePaste(pasteId) {
+      try {
+        await fetch('/pastes/' + encodeURIComponent(pasteId), {
+          method: 'DELETE',
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+        loadDzHistory();
+      } catch {}
+    }
+
+    function timeAgo(date) {
+      const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (seconds < 60) return 'just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return minutes + 'm ago';
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return hours + 'h ago';
+      const days = Math.floor(hours / 24);
+      return days + 'd ago';
+    }
+
+    function esc(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    // Listen for WebSocket paste events
+    const origWsOnMessage = ws?.onmessage;
+    if (typeof ws !== 'undefined') {
+      const origOnMessage = ws.onmessage;
+      ws.addEventListener('message', function(event) {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'paste_delivered' || msg.type === 'paste_acknowledged') {
+            loadDzHistory();
+          }
+        } catch {}
+      });
+    }
+
   </script>
 </body>
 </html>
