@@ -18,15 +18,6 @@ The guided setup wizard handles everything:
 
 Within minutes, you're talking to your partner from your phone.
 
-## Global Install (Optional)
-
-If you prefer a persistent CLI:
-
-```bash
-npm install -g instar
-instar
-```
-
 ## What Gets Created
 
 After setup, you'll have:

@@ -68,7 +68,7 @@ export async function runSetup(): Promise<void> {
     console.log();
     console.log(pc.red('  Setup wizard skill not found.'));
     console.log(pc.dim(`  Expected: ${skillPath}`));
-    console.log(pc.dim('  This may indicate a corrupted installation. Try: npm install -g instar'));
+    console.log(pc.dim('  This may indicate a corrupted installation. Try: npx instar'));
     console.log();
     process.exit(1);
   }
@@ -641,7 +641,7 @@ function findInstarCli(): string {
   if (cliPath.includes('.npm/_npx')) {
     console.warn(
       '[setup] WARNING: Running from npx cache. The launchd plist will use bare "instar" command.\n' +
-      '  For reliable auto-updates, install globally first: npm install -g instar'
+      '  Auto-updates are handled via shadow installs — no global install needed.'
     );
   }
 
