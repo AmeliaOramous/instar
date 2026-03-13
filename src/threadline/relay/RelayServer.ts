@@ -229,6 +229,24 @@ export class RelayServer {
           return;
         }
 
+        // Debug: connected agents with visibility (for diagnosing discovery issues)
+        if (pathname === '/debug/agents') {
+          const agents = this.presence.getAll();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            connected: agents.map(a => ({
+              agentId: a.agentId,
+              name: a.metadata.name,
+              visibility: a.visibility,
+              status: a.status,
+              framework: a.metadata.framework,
+              connectedSince: a.connectedSince,
+            })),
+            count: agents.length,
+          }));
+          return;
+        }
+
         // Registry dashboard (HTML)
         if (pathname === '/registry' || pathname === '/registry/') {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
