@@ -18,7 +18,7 @@ export default defineConfig({
         src: './public/logo.png',
       },
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/SageMindAI/instar' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/JKHeadley/instar' },
       ],
       customCss: [
         './src/styles/starlight-custom.css',
