@@ -82,6 +82,7 @@ import type { CoherenceGate } from '../core/CoherenceGate.js';
 import type { PasteManager } from '../paste/PasteManager.js';
 import type { WebSocketManager } from './WebSocketManager.js';
 import { TruncationDetector } from '../paste/TruncationDetector.js';
+import { SecretDrop } from './SecretDrop.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -547,6 +548,69 @@ export function createRoutes(ctx: RouteContext): Router {
       res.json({ agents });
     } catch {
       res.status(500).json({ error: 'Failed to load agent registry' });
+    }
+  });
+
+  /**
+   * Cross-agent restart — restart another agent on this machine.
+   *
+   * Uses the agent registry to find the agent's path, then starts the server
+   * via the shadow install CLI. This lets any agent recover any other agent
+   * on the same machine, solving the dead man's switch problem where an agent
+   * can't restart itself and the user has no other way in.
+   */
+  router.post('/agents/:name/restart', async (req, res) => {
+    const { name } = req.params;
+    try {
+      const { listAgents } = await import('../core/AgentRegistry.js');
+      const agents = listAgents();
+      const agent = agents.find((a: { name: string }) =>
+        a.name === name || a.name === `${name}-lifeline`
+      );
+
+      if (!agent) {
+        res.status(404).json({ error: `Agent "${name}" not found in registry` });
+        return;
+      }
+
+      // Don't restart self — that's a different code path
+      if (agent.name === ctx.config.projectName) {
+        res.status(400).json({ error: 'Cannot restart self via cross-agent restart. Use /lifeline restart.' });
+        return;
+      }
+
+      const agentPath = agent.path.replace(/-lifeline$/, ''); // Normalize to main agent path
+      const shadowCli = `${agentPath}/.instar/shadow-install/node_modules/instar/dist/cli.js`;
+      const { existsSync } = await import('node:fs');
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execFileAsync = promisify(execFile);
+
+      if (!existsSync(shadowCli)) {
+        res.status(500).json({ error: `Shadow install not found for "${name}" at ${shadowCli}` });
+        return;
+      }
+
+      // Start the server via the shadow install CLI
+      // This will handle tmux session creation, port binding, etc.
+      try {
+        await execFileAsync('node', [shadowCli, 'server', 'start', '--dir', agentPath], {
+          cwd: agentPath,
+          timeout: 30_000,
+        });
+        res.json({ success: true, message: `Agent "${name}" restart initiated`, agentPath });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        // "Server started in tmux" in stdout is actually success — execFile may still "fail"
+        // because the CLI exits after spawning tmux
+        if (errMsg.includes('Server started') || errMsg.includes('already running')) {
+          res.json({ success: true, message: `Agent "${name}" restart initiated`, agentPath });
+        } else {
+          res.status(500).json({ error: `Failed to restart "${name}": ${errMsg}` });
+        }
+      }
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Cross-agent restart failed' });
     }
   });
 
@@ -3578,6 +3642,154 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     res.json({ ok: true, deleted: req.params.id });
+  });
+
+  // ── Secret Drop (secure secret submission) ─────────────────────
+
+  const secretDrop = new SecretDrop(ctx.config.projectName || 'Agent');
+
+  /** Build a browser-clickable tunnel URL for a secret drop */
+  function secretDropUrl(token: string): { localUrl: string; tunnelUrl: string | null } {
+    const localUrl = `/secrets/drop/${token}`;
+    const tunnelUrl = ctx.tunnel?.getExternalUrl(localUrl) ?? null;
+    return { localUrl, tunnelUrl };
+  }
+
+  // Create a new secret request (agent-facing, requires auth)
+  router.post('/secrets/request', (req, res) => {
+    const { label, description, fields, topicId, ttlMs } = req.body;
+
+    if (!label || typeof label !== 'string' || label.length > 256) {
+      res.status(400).json({ error: '"label" must be a non-empty string under 256 characters' });
+      return;
+    }
+    if (description !== undefined && (typeof description !== 'string' || description.length > 1024)) {
+      res.status(400).json({ error: '"description" must be a string under 1024 characters' });
+      return;
+    }
+    if (fields !== undefined) {
+      if (!Array.isArray(fields) || fields.length === 0 || fields.length > 10) {
+        res.status(400).json({ error: '"fields" must be an array of 1-10 items' });
+        return;
+      }
+      for (const f of fields) {
+        if (!f.name || typeof f.name !== 'string' || !f.label || typeof f.label !== 'string') {
+          res.status(400).json({ error: 'Each field must have a "name" and "label"' });
+          return;
+        }
+      }
+    }
+    if (topicId !== undefined && (typeof topicId !== 'number' || !Number.isInteger(topicId))) {
+      res.status(400).json({ error: '"topicId" must be an integer' });
+      return;
+    }
+    if (ttlMs !== undefined && (typeof ttlMs !== 'number' || ttlMs < 60_000 || ttlMs > 3600_000)) {
+      res.status(400).json({ error: '"ttlMs" must be between 60000 (1 min) and 3600000 (1 hour)' });
+      return;
+    }
+
+    try {
+      const { token } = secretDrop.create({ label, description, fields, topicId, ttlMs });
+      const urls = secretDropUrl(token);
+      res.status(201).json({
+        token,
+        ...urls,
+        expiresIn: ttlMs || 15 * 60 * 1000,
+      });
+    } catch (err) {
+      res.status(429).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Serve the secret submission form (user-facing, NO auth — token is the auth)
+  router.get('/secrets/drop/:token', (req, res) => {
+    const request = secretDrop.getPending(req.params.token);
+    if (!request) {
+      const html = secretDrop.renderExpiredPage();
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.status(410).send(html);
+      return;
+    }
+
+    const html = secretDrop.renderForm(request);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    // Security headers — prevent framing, sniffing, caching
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.send(html);
+  });
+
+  // Receive a secret submission (user-facing, NO auth — token + CSRF is the auth)
+  router.post('/secrets/drop/:token', (req, res) => {
+    const { _csrf, ...values } = req.body;
+
+    if (!_csrf || typeof _csrf !== 'string') {
+      res.status(400).json({ error: 'Missing CSRF token' });
+      return;
+    }
+
+    // Validate all values are strings
+    for (const [key, val] of Object.entries(values)) {
+      if (typeof val !== 'string') {
+        res.status(400).json({ error: `Field "${key}" must be a string` });
+        return;
+      }
+      if ((val as string).length > 10_000) {
+        res.status(400).json({ error: `Field "${key}" exceeds maximum length (10KB)` });
+        return;
+      }
+    }
+
+    const submission = secretDrop.submit(req.params.token, _csrf, values as Record<string, string>);
+    if (!submission) {
+      res.status(410).json({ error: 'This link has expired or already been used' });
+      return;
+    }
+
+    // Send Telegram confirmation if topic is configured
+    if (submission.topicId && ctx.telegram) {
+      const fieldCount = Object.keys(submission.values).length;
+      const confirmMsg = `\u2705 Secret received for "${submission.label}" (${fieldCount} field${fieldCount !== 1 ? 's' : ''}).`;
+      ctx.telegram.sendToTopic(submission.topicId, confirmMsg).catch(() => {
+        // Non-fatal — the submission itself succeeded
+      });
+    }
+
+    res.json({ ok: true, receivedAt: submission.receivedAt });
+  });
+
+  // List pending secret requests (agent-facing, requires auth)
+  router.get('/secrets/pending', (_req, res) => {
+    const pending = secretDrop.listPending();
+    res.json({
+      pending: pending.map(p => ({
+        ...p,
+        ...secretDropUrl(p.token),
+      })),
+    });
+  });
+
+  // Cancel a pending secret request (agent-facing, requires auth)
+  router.delete('/secrets/pending/:token', (req, res) => {
+    const cancelled = secretDrop.cancel(req.params.token);
+    if (!cancelled) {
+      res.status(404).json({ error: 'Request not found or already expired' });
+      return;
+    }
+    res.json({ ok: true });
+  });
+
+  // Retrieve a received secret (agent-facing, requires auth)
+  // This is for polling-based retrieval — the secret is returned once and deleted.
+  router.post('/secrets/retrieve/:token', (req, res) => {
+    const submission = secretDrop.getReceived(req.params.token);
+    if (!submission) {
+      res.status(404).json({ error: 'No submission found for this token' });
+      return;
+    }
+    res.json(submission);
   });
 
   // ── Tunnel Status ──────────────────────────────────────────────

@@ -285,6 +285,17 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 
 **Use private views for sensitive content. Use Telegraph for public content.**
 
+**Secret Drop** — Securely collect secrets (API keys, passwords, tokens) from users without exposing them in chat history.
+- Request a secret: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/request -H 'Content-Type: application/json' -d '{"label":"OpenAI API Key","description":"Needed for GPT integration","topicId":TOPIC_ID}'\`
+- The response includes a one-time URL (\`localUrl\` and \`tunnelUrl\`). Send this link to the user.
+- When the user submits the secret through the form, you receive a Telegram confirmation in the specified topic.
+- Retrieve the secret: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/retrieve/TOKEN\`
+- List pending: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/pending\`
+- Cancel: \`curl -X DELETE -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/pending/TOKEN\`
+- **Security**: One-time use, expires after 15 minutes, in-memory only (never written to disk), CSRF-protected.
+- **Multi-field support**: Request multiple values at once by passing a \`fields\` array (e.g., username + password).
+- **When to use**: Any time you need a secret from the user. NEVER ask users to paste secrets into Telegram or chat.
+
 **Cloudflare Tunnel** — Expose the local server to the internet via Cloudflare. Enables remote access to private views, the API, and file serving.
 - Status: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/tunnel\`
 - Configure in \`.instar/config.json\`: \`{"tunnel": {"enabled": true, "type": "quick"}}\`
@@ -407,7 +418,9 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 
 **Agent Registry** — Discover all agents running on this machine. Useful for multi-agent coordination and awareness.
 - List agents: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/agents\`
+- Restart another agent: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/agents/AGENT_NAME/restart\`
 - **When to use**: When a user asks about other agents, when coordinating tasks across projects, or when checking if another agent is running.
+- **Cross-agent restart**: If another agent on this machine is down and unrecoverable, you can restart it from here. This solves the dead man's switch problem where an agent can't restart itself.
 
 **Scripts** — Reusable capabilities in \`.claude/scripts/\`.
 

@@ -239,6 +239,7 @@ function scanRouteGroups() {
     { name: 'messages', domain: 'coordination' },
     { name: 'system-reviews', domain: 'monitoring' },
     { name: 'machine-mesh', domain: 'coordination' },
+    { name: 'secret-drop', domain: 'security' },
   ];
 
   // Hash the routes source for drift detection

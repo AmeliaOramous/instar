@@ -70,6 +70,13 @@ export function authMiddleware(authToken?: string) {
       return;
     }
 
+    // Secret drop routes — the token in the URL IS the auth.
+    // GET serves the form, POST receives the submission. Both are user-facing.
+    if (req.path.startsWith('/secrets/drop/')) {
+      next();
+      return;
+    }
+
     // View routes support signed URLs for browser access (see ?sig= below)
     if (req.path.startsWith('/view/') && req.method === 'GET') {
       const sig = typeof req.query.sig === 'string' ? req.query.sig : null;
