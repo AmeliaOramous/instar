@@ -2879,6 +2879,23 @@ export class TelegramAdapter implements MessagingAdapter {
       const updates = await this.getUpdates();
       this.consecutivePollErrors = 0; // Reset on success
 
+      // Offset range sanity check: if received update_ids are significantly lower
+      // than our stored offset, the offset is likely from a different bot token or
+      // was corrupted during a migration. Auto-correct to prevent infinite replay.
+      if (updates.length > 0 && this.lastUpdateId > 0) {
+        const maxReceivedId = Math.max(...updates.map(u => u.update_id));
+        const OFFSET_RANGE_THRESHOLD = 10_000_000; // 10M delta = cross-token corruption
+        if (maxReceivedId < this.lastUpdateId - OFFSET_RANGE_THRESHOLD) {
+          console.warn(
+            `[telegram] Offset range mismatch: stored=${this.lastUpdateId}, ` +
+            `received max=${maxReceivedId} (delta=${this.lastUpdateId - maxReceivedId}). ` +
+            `Auto-correcting offset to prevent infinite replay loop.`
+          );
+          this.lastUpdateId = maxReceivedId;
+          this.saveOffset();
+        }
+      }
+
       for (const update of updates) {
         await this.processUpdate(update);
         this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);

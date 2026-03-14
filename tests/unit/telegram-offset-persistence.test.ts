@@ -93,4 +93,40 @@ describe('TelegramAdapter — offset persistence', () => {
       expect(saveSection).toContain('unlinkSync(tmpPath)');
     });
   });
+
+  describe('offset range sanity check', () => {
+    it('detects cross-token offset corruption in poll()', () => {
+      // A sanity check must exist that detects when received update_ids are
+      // significantly lower than the stored offset — indicating the offset was
+      // written by a different bot token or corrupted during migration.
+      const pollSection = source.slice(source.indexOf('private async poll'));
+      expect(pollSection).toContain('OFFSET_RANGE_THRESHOLD');
+    });
+
+    it('uses a 10M delta threshold for corruption detection', () => {
+      const pollSection = source.slice(source.indexOf('private async poll'));
+      expect(pollSection).toContain('10_000_000');
+    });
+
+    it('auto-corrects offset when corruption detected', () => {
+      // Must reset this.lastUpdateId to the received max and save
+      const pollSection = source.slice(source.indexOf('private async poll'));
+      const sanitySection = pollSection.slice(
+        pollSection.indexOf('OFFSET_RANGE_THRESHOLD'),
+        pollSection.indexOf('for (const update of updates)')
+      );
+      expect(sanitySection).toContain('this.lastUpdateId = maxReceivedId');
+      expect(sanitySection).toContain('this.saveOffset()');
+    });
+
+    it('logs a warning when auto-correcting offset', () => {
+      const pollSection = source.slice(source.indexOf('private async poll'));
+      const sanitySection = pollSection.slice(
+        pollSection.indexOf('OFFSET_RANGE_THRESHOLD'),
+        pollSection.indexOf('for (const update of updates)')
+      );
+      expect(sanitySection).toContain('console.warn');
+      expect(sanitySection).toContain('Auto-correcting');
+    });
+  });
 });
