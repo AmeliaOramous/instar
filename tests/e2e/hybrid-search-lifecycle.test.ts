@@ -68,6 +68,7 @@ describe('Hybrid Search E2E lifecycle', () => {
     const mockConfig: InstarConfig = {
       agentName: 'test-hybrid-agent',
       projectDir: tmpDir,
+      stateDir,
       claudePath: '/usr/bin/true',
       authToken: AUTH_TOKEN,
     };
