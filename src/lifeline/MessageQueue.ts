@@ -18,6 +18,8 @@ export interface QueuedMessage {
   timestamp: string;
   voiceFile?: string;
   photoPath?: string;
+  /** Number of times this message has been replayed and failed to deliver. */
+  replayFailures?: number;
 }
 
 export class MessageQueue {

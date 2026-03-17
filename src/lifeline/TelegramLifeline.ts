@@ -376,9 +376,11 @@ export class TelegramLifeline {
         fromFirstName: msg.from.first_name,
         timestamp: new Date(msg.date * 1000).toISOString(),
       });
-      await this.sendToTopic(topicId,
-        `Server is restarting. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
-      );
+      if (this.shouldSendQueueAck(topicId)) {
+        await this.sendToTopic(topicId,
+          `Server is restarting. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+        );
+      }
       return;
     }
 
@@ -393,10 +395,12 @@ export class TelegramLifeline {
       timestamp: new Date(msg.date * 1000).toISOString(),
     });
 
-    // Notify user that message is queued
-    await this.sendToTopic(topicId,
-      `Server is temporarily down. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
-    );
+    // Notify user that message is queued (rate-limited to prevent spam during restart loops)
+    if (this.shouldSendQueueAck(topicId)) {
+      await this.sendToTopic(topicId,
+        `Server is temporarily down. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+      );
+    }
   }
 
   /**
@@ -441,14 +445,16 @@ export class TelegramLifeline {
       photoPath,
     });
 
-    if (this.supervisor.healthy) {
-      await this.sendToTopic(topicId,
-        `Server is restarting. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
-      );
-    } else {
-      await this.sendToTopic(topicId,
-        `Server is temporarily down. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
-      );
+    if (this.shouldSendQueueAck(topicId)) {
+      if (this.supervisor.healthy) {
+        await this.sendToTopic(topicId,
+          `Server is restarting. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+        );
+      } else {
+        await this.sendToTopic(topicId,
+          `Server is temporarily down. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+        );
+      }
     }
   }
 
@@ -619,6 +625,9 @@ export class TelegramLifeline {
 
   // ── Queue Replay ──────────────────────────────────────────
 
+  /** Max times a message can fail replay before being dropped. */
+  private static readonly MAX_REPLAY_FAILURES = 3;
+
   private async replayQueue(): Promise<void> {
     const messages = this.queue.drain();
     if (messages.length === 0) return;
@@ -626,8 +635,17 @@ export class TelegramLifeline {
     console.log(`[Lifeline] Replaying ${messages.length} queued messages`);
     let replayed = 0;
     let failed = 0;
+    let dropped = 0;
 
     for (const msg of messages) {
+      // Drop messages that have failed too many times — they likely cause crashes
+      const failures = msg.replayFailures ?? 0;
+      if (failures >= TelegramLifeline.MAX_REPLAY_FAILURES) {
+        dropped++;
+        console.warn(`[Lifeline] Dropping message ${msg.id} after ${failures} replay failures: ${msg.text.slice(0, 80)}`);
+        continue;
+      }
+
       const forwarded = await this.forwardToServer(msg.topicId, msg.text, {
         message_id: parseInt(msg.id.replace('tg-', ''), 10) || 0,
         from: {
@@ -644,17 +662,33 @@ export class TelegramLifeline {
       if (forwarded) {
         replayed++;
       } else {
-        // Re-queue failed messages
+        // Re-queue with incremented failure counter
+        msg.replayFailures = failures + 1;
         this.queue.enqueue(msg);
         failed++;
+        // If the server just went down during replay, stop replaying —
+        // remaining messages will be replayed on next recovery
+        if (!this.supervisor.healthy) {
+          const remaining = messages.length - replayed - failed - dropped;
+          if (remaining > 0) {
+            console.log(`[Lifeline] Server went down during replay — re-queuing ${remaining} remaining messages`);
+            // Re-queue remaining unprocessed messages (preserve their failure counts)
+            const currentIndex = messages.indexOf(msg);
+            for (let i = currentIndex + 1; i < messages.length; i++) {
+              this.queue.enqueue(messages[i]);
+            }
+            failed += remaining;
+          }
+          break;
+        }
       }
 
       // Small delay between messages to avoid overwhelming the server
       await new Promise(r => setTimeout(r, 500));
     }
 
-    if (replayed > 0 || failed > 0) {
-      console.log(`[Lifeline] Replay complete: ${replayed} delivered, ${failed} re-queued`);
+    if (replayed > 0 || failed > 0 || dropped > 0) {
+      console.log(`[Lifeline] Replay complete: ${replayed} delivered, ${failed} re-queued, ${dropped} dropped`);
     }
   }
 
@@ -666,6 +700,13 @@ export class TelegramLifeline {
   private suppressedServerDownCount = 0;
   /** Minimum interval between "server down" notifications (30 minutes). */
   private static readonly SERVER_DOWN_RATE_LIMIT_MS = 30 * 60_000;
+
+  /** Per-topic timestamps for rate-limiting queue acknowledgment messages. */
+  private lastQueueAckAt = new Map<number, number>();
+  /** Minimum interval between "your message has been queued" acks per topic (2 minutes). */
+  private static readonly QUEUE_ACK_RATE_LIMIT_MS = 2 * 60_000;
+  /** Queue size threshold above which ack messages are suppressed entirely. */
+  private static readonly QUEUE_ACK_SUPPRESS_THRESHOLD = 100;
 
   /**
    * Load persisted rate limit state from disk.
@@ -700,6 +741,26 @@ export class TelegramLifeline {
     } catch {
       // @silent-fallback-ok — rate limit persistence is best-effort
     }
+  }
+
+  /**
+   * Check if a queue acknowledgment should be sent for this topic.
+   * Rate-limits acks to prevent Telegram spam during restart loops.
+   */
+  private shouldSendQueueAck(topicId: number): boolean {
+    // Suppress entirely when queue is very large — the user already knows
+    if (this.queue.length >= TelegramLifeline.QUEUE_ACK_SUPPRESS_THRESHOLD) {
+      return false;
+    }
+
+    const now = Date.now();
+    const lastAck = this.lastQueueAckAt.get(topicId) ?? 0;
+    if (lastAck > 0 && (now - lastAck) < TelegramLifeline.QUEUE_ACK_RATE_LIMIT_MS) {
+      return false;
+    }
+
+    this.lastQueueAckAt.set(topicId, now);
+    return true;
   }
 
   private async notifyServerDown(reason: string): Promise<void> {
