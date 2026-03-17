@@ -386,7 +386,7 @@ export function forceRemoveRegistryLock(): boolean {
       console.log(`[AgentRegistry] Force-removed stale lock: ${lockPath}`);
       return true;
     }
-  } catch (err) {
+  } catch (err) { // @silent-fallback-ok — best-effort recovery, retried on next heartbeat
     console.error(`[AgentRegistry] Failed to force-remove lock: ${err}`);
   }
   return false;
