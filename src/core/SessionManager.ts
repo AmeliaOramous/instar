@@ -51,6 +51,17 @@ import { sanitizeSenderName, sanitizeTopicName } from '../utils/sanitize.js';
 /** Absolute maximum session duration (4 hours) — safety net for sessions without explicit timeout */
 const DEFAULT_MAX_DURATION_MINUTES = 240;
 
+/** Minutes of idle-at-prompt before a non-protected session is killed */
+const IDLE_PROMPT_KILL_MINUTES = 15;
+
+/** Patterns that indicate Claude is sitting at its idle prompt (not actively working) */
+const IDLE_PROMPT_PATTERNS = [
+  'bypass permissions on',
+  'shift+tab to cycle',
+  'auto-accept edits',
+  // The bare prompt character at end of output (after stripping ANSI)
+];
+
 /** Sanitize a string for use as part of a tmux session name. */
 function sanitizeSessionName(name: string): string {
   const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
@@ -68,6 +79,9 @@ export class SessionManager extends EventEmitter {
   private monitoringInProgress = false;
   private inputGuard: InputGuard | null = null;
   private registryPath: string | null = null;
+
+  /** Track when each session was first seen idle at the Claude prompt. Key = session ID */
+  private idlePromptSince = new Map<string, number>();
 
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
@@ -182,6 +196,39 @@ export class SessionManager extends EventEmitter {
             session.endedAt = new Date().toISOString();
             this.state.saveSession(session);
             this.emit('sessionComplete', session);
+            continue;
+          }
+        }
+
+        // Idle prompt detection — kill sessions sitting at the Claude prompt too long.
+        // This catches "zombie" sessions: Claude finished its work but never exited,
+        // sitting at the input prompt consuming a session slot.
+        if (!this.config.protectedSessions.includes(session.tmuxSession)) {
+          const output = this.captureOutput(session.tmuxSession, 5);
+          const isIdleAtPrompt = output && IDLE_PROMPT_PATTERNS.some(p => output.includes(p));
+
+          if (isIdleAtPrompt) {
+            const now = Date.now();
+            if (!this.idlePromptSince.has(session.id)) {
+              this.idlePromptSince.set(session.id, now);
+            } else {
+              const idleMs = now - this.idlePromptSince.get(session.id)!;
+              if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
+                console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m. Killing zombie.`);
+                try {
+                  await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
+                } catch { /* ignore */ }
+                session.status = 'completed';
+                session.endedAt = new Date().toISOString();
+                this.state.saveSession(session);
+                this.emit('sessionComplete', session);
+                this.idlePromptSince.delete(session.id);
+                continue;
+              }
+            }
+          } else {
+            // Session is active — clear idle tracker
+            this.idlePromptSince.delete(session.id);
           }
         }
       }
