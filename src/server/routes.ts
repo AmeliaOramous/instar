@@ -3796,7 +3796,7 @@ export function createRoutes(ctx: RouteContext): Router {
       const fieldCount = Object.keys(submission.values).length;
       const confirmMsg = `\u2705 Secret received for "${submission.label}" (${fieldCount} field${fieldCount !== 1 ? 's' : ''}).`;
       ctx.telegram.sendToTopic(submission.topicId, confirmMsg).catch(() => {
-        // Non-fatal — the submission itself succeeded
+        // @silent-fallback-ok — Non-fatal — the submission itself succeeded
       });
     }
 
