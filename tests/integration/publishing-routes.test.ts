@@ -105,6 +105,7 @@ describe('Publishing routes integration', () => {
         .send({
           title: 'Test Report',
           markdown: '# Hello World\n\nThis is a test report with **bold** text.',
+          confirmed: true,
         })
         .expect(201);
 
@@ -129,6 +130,16 @@ describe('Publishing routes integration', () => {
         .expect(400);
 
       expect(res.body.error).toContain('markdown');
+    });
+
+    it('requires confirmation before publishing', async () => {
+      const res = await request(app)
+        .post('/publish')
+        .send({ title: 'Test', markdown: 'Some content' })
+        .expect(400);
+
+      expect(res.body.requiresConfirmation).toBe(true);
+      expect(res.body.error).toContain('confirmation');
     });
 
     it('rejects oversized markdown', async () => {
@@ -165,7 +176,7 @@ describe('Publishing routes integration', () => {
 
       await request(app)
         .post('/publish')
-        .send({ title: 'Original', markdown: 'Original content' })
+        .send({ title: 'Original', markdown: 'Original content', confirmed: true })
         .expect(201);
 
       // Then edit
