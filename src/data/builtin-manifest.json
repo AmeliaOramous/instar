@@ -1,8 +1,8 @@
 {
   "$schema": "./builtin-manifest.schema.json",
   "schemaVersion": 1,
-  "generatedAt": "2026-03-18T22:49:40.798Z",
-  "instarVersion": "0.23.8",
+  "generatedAt": "2026-03-19T03:01:43.946Z",
+  "instarVersion": "0.23.10",
   "entryCount": 170,
   "entries": {
     "hook:session-start": {
@@ -1279,7 +1279,7 @@
       "type": "subsystem",
       "domain": "sessions",
       "sourcePath": "src/core/SessionManager.ts",
-      "contentHash": "d306e487b56bc9e7d6afc74e85b9297de288be30724975dc0fe3fd0eb437d714",
+      "contentHash": "26d85bd80f69df1204649917afb2d3c7469e774529746099c9ea4bfafc6e03a3",
       "since": "2025-01-01"
     },
     "subsystem:auto-updater": {
@@ -1335,7 +1335,7 @@
       "type": "subsystem",
       "domain": "communication",
       "sourcePath": "src/lifeline/TelegramLifeline.ts",
-      "contentHash": "bb02e93e8e40ac3f108784bef9b0d3512a46213111903950e1388d940c7e204d",
+      "contentHash": "e87a82c62a5cba682d6d78ed023f684d559b88ccef7420a070d0ea55c82053a1",
       "since": "2025-01-01"
     },
     "subsystem:orphan-process-reaper": {
