@@ -36,6 +36,14 @@ import { ServerSupervisor } from './ServerSupervisor.js';
 /**
  * Acquire an exclusive lock file to prevent multiple lifeline instances.
  * Returns true if lock acquired, false if another instance holds it.
+ *
+ * Handles three cases:
+ * 1. No lock file → acquire immediately
+ * 2. Lock held by dead process → take over (stale lock)
+ * 3. Lock held by alive process → check age. If the lock holder has been
+ *    running for >5 minutes but isn't responding (zombie after sleep/wake),
+ *    force-kill it and take over. This prevents permanently stuck lifelines
+ *    from blocking new instances after a crash.
  */
 function acquireLockFile(lockPath: string): boolean {
   try {
@@ -47,8 +55,34 @@ function acquireLockFile(lockPath: string): boolean {
         try {
           // Signal 0 checks if process exists without killing it
           process.kill(data.pid, 0);
-          // Process still alive — another lifeline is running
-          return false;
+
+          // Process is alive — but is it a zombie from a sleep/wake crash?
+          // If the lock was created over 5 minutes ago, the old lifeline
+          // should be well-established. Check if it's actually functional
+          // by verifying the process is a node process (not a zombie).
+          if (data.startedAt) {
+            const lockAge = Date.now() - new Date(data.startedAt).getTime();
+            const fiveMinutes = 5 * 60_000;
+            if (lockAge > fiveMinutes) {
+              // Check if the process is a zombie or stopped
+              const procInfo = spawnSync('/bin/ps', ['-p', String(data.pid), '-o', 'stat='], {
+                encoding: 'utf-8', timeout: 3000,
+              }).stdout?.trim() ?? '';
+              if (procInfo.includes('Z') || procInfo.includes('T')) {
+                console.log(`[Lifeline] Lock holder PID ${data.pid} is zombie/stopped (state: ${procInfo}) — taking over`);
+                try { process.kill(data.pid, 'SIGKILL'); } catch { /* ignore */ }
+              } else {
+                // Process is alive and not a zombie — another lifeline is truly running
+                return false;
+              }
+            } else {
+              // Lock is fresh — another lifeline is running
+              return false;
+            }
+          } else {
+            // No startedAt — legacy lock, respect it
+            return false;
+          }
         } catch {
           // Process is dead — stale lock, we can take over
           console.log(`[Lifeline] Removing stale lock (PID ${data.pid} is dead)`);
@@ -237,6 +271,11 @@ export class TelegramLifeline {
       console.log(pc.yellow('  Server failed to start — lifeline will keep trying'));
     }
 
+    // Flush stale Telegram connections before starting poll loop.
+    // After hard kills or sleep/wake, a previous long-poll connection may still be
+    // held by Telegram's servers, causing 409 Conflict errors for ~30s.
+    await this.flushStaleConnection();
+
     // Start Telegram polling
     this.polling = true;
     this.poll();
@@ -292,6 +331,64 @@ export class TelegramLifeline {
 
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
+  }
+
+  // ── Stale Connection Flush ───────────────────────────────
+
+  /**
+   * Flush stale Telegram connections on startup.
+   * After a hard kill or sleep/wake, a previous long-poll getUpdates call may
+   * still be active on Telegram's side. This causes 409 Conflict errors until
+   * the old connection times out (~30s). We claim the polling slot immediately
+   * with a non-blocking getUpdates call (timeout=0), which invalidates any
+   * stale long-poll connection.
+   */
+  private async flushStaleConnection(): Promise<void> {
+    try {
+      // Clear any stale webhook that might exist
+      await this.apiCall('deleteWebhook', { drop_pending_updates: false });
+
+      // Non-blocking getUpdates claims the polling slot, invalidating stale connections
+      await this.apiCall('getUpdates', {
+        offset: this.lastUpdateId + 1,
+        timeout: 0,
+        allowed_updates: ['message'],
+      });
+      console.log('[Lifeline] Stale connection flushed');
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes('409') && errMsg.includes('Conflict')) {
+        // Stale connection detected — retry with exponential backoff.
+        // After a hard crash, the old long-poll connection can linger on Telegram's
+        // servers for up to 30s. One retry at 2s often isn't enough.
+        const maxRetries = 5;
+        const delays = [2000, 4000, 8000, 16000, 32000]; // Total: ~62s coverage
+
+        for (let i = 0; i < maxRetries; i++) {
+          console.log(`[Lifeline] 409 on flush — retry ${i + 1}/${maxRetries} in ${delays[i] / 1000}s`);
+          await new Promise(r => setTimeout(r, delays[i]));
+          try {
+            await this.apiCall('getUpdates', {
+              offset: this.lastUpdateId + 1,
+              timeout: 0,
+              allowed_updates: ['message'],
+            });
+            console.log(`[Lifeline] Stale connection flushed (retry ${i + 1} succeeded)`);
+            return;
+          } catch (retryErr) {
+            const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+            if (!retryMsg.includes('409')) {
+              // Different error — not a stale connection issue anymore
+              console.warn(`[Lifeline] Flush retry ${i + 1} failed with non-409 error: ${retryMsg}`);
+              return;
+            }
+          }
+        }
+        console.warn('[Lifeline] Stale connection flush exhausted all retries — poll backoff will handle it');
+      } else {
+        console.warn(`[Lifeline] Stale connection flush failed: ${errMsg}`);
+      }
+    }
   }
 
   // ── Telegram Polling ──────────────────────────────────────
@@ -1329,8 +1426,9 @@ export class TelegramLifeline {
       let needsRegeneration = false;
       let reason = '';
 
-      // Check 1: Plist should use the JS boot wrapper (not bash, not hardcoded paths)
-      if (!content.includes('instar-boot.js')) {
+      // Check 1: Plist should use the JS/CJS boot wrapper (not bash, not hardcoded paths)
+      // Both .js and .cjs are valid — .cjs is used when the project has "type": "module"
+      if (!content.includes('instar-boot.js') && !content.includes('instar-boot.cjs')) {
         needsRegeneration = true;
         reason = content.includes('instar-boot.sh')
           ? 'uses bash boot wrapper (vulnerable to macOS TCC/FDA restrictions)'
@@ -1418,6 +1516,11 @@ export class TelegramLifeline {
 
       return topicId;
     } catch (err) {
+      const errStr = String(err);
+      if (errStr.includes('not a forum') || errStr.includes('FORUM_REQUIRED')) {
+        console.warn('[Lifeline] Chat is not a forum-enabled supergroup. Lifeline will operate without a dedicated topic. To enable topics, convert your Telegram group to a supergroup with Topics enabled.');
+        return null;
+      }
       console.error(`[Lifeline] Failed to create Lifeline topic: ${err}`);
       return null;
     }
@@ -1516,13 +1619,19 @@ export class TelegramLifeline {
 
   private loadOffset(): void {
     try {
-      if (fs.existsSync(this.offsetPath)) {
-        const data = JSON.parse(fs.readFileSync(this.offsetPath, 'utf-8'));
-        if (typeof data.lastUpdateId === 'number' && data.lastUpdateId > 0) {
-          this.lastUpdateId = data.lastUpdateId;
-        }
+      const raw = fs.readFileSync(this.offsetPath, 'utf-8');
+      const data = JSON.parse(raw);
+      const candidate = data.lastUpdateId ?? data.offset;
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate > 0) {
+        this.lastUpdateId = candidate;
+      } else if (data.lastUpdateId !== undefined || data.offset !== undefined) {
+        console.warn(`[Lifeline] Poll offset file has invalid value: ${raw.trim().substring(0, 100)}. Starting from 0.`);
       }
-    } catch { /* start from 0 */ }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.warn(`[Lifeline] Poll offset file corrupted, starting from 0: ${err}`);
+      }
+    }
   }
 
   private saveOffset(): void {

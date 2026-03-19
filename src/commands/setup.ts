@@ -763,7 +763,20 @@ function escapeXml(str: string): string {
 function installBootWrapper(projectDir: string): { sh: string; js: string } {
   const stateDir = path.join(projectDir, '.instar');
   const shPath = path.join(stateDir, 'instar-boot.sh');
-  const jsPath = path.join(stateDir, 'instar-boot.js');
+
+  // Use .cjs extension if the project has "type": "module" in package.json.
+  // Without this, Node treats the boot wrapper as ESM and `require()` fails.
+  let usesCjs = false;
+  try {
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf-8'));
+    usesCjs = pkgJson.type === 'module';
+  } catch { /* no package.json or parse error — use .js */ }
+  const jsExt = usesCjs ? '.cjs' : '.js';
+  const jsPath = path.join(stateDir, `instar-boot${jsExt}`);
+  // Clean up the other extension if it exists (prevents stale wrapper confusion)
+  const altPath = path.join(stateDir, `instar-boot${usesCjs ? '.js' : '.cjs'}`);
+  try { fs.unlinkSync(altPath); } catch { /* didn't exist */ }
+
   const shadowCli = path.join(stateDir, 'shadow-install', 'node_modules', 'instar', 'dist', 'cli.js');
 
   const shadowDir = path.join(stateDir, 'shadow-install');
