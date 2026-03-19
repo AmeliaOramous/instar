@@ -235,6 +235,9 @@ export class TelegramAdapter implements MessagingAdapter {
   private config: TelegramConfig;
   private handler: ((message: Message) => Promise<void>) | null = null;
   private polling = false;
+
+  /** True when this adapter is actively polling for messages (false in send-only mode). */
+  get isPolling(): boolean { return this.polling; }
   private pollTimeout: ReturnType<typeof setTimeout> | null = null;
   private lastUpdateId = 0;
   private startedAt: Date | null = null;

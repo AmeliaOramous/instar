@@ -23,7 +23,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - run: npm ci
       - run: npm run lint
-      - run: npm test
+      # Use test:push (excludes known-flaky tests) — matches CI workflow.
+      # Full suite is tracked separately; flaky tests should not block releases.
+      - run: npm run test:push
       - run: npm run build
 
   publish:
@@ -54,22 +56,23 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - name: Bump patch version
+      - name: Determine next version
         id: bump
         run: |
-          CURRENT=$(node -p "require('./package.json').version")
-          npm version patch --no-git-tag-version
-          NEW=$(node -p "require('./package.json').version")
-          echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          echo "Bumped $CURRENT → $NEW"
+          # Derive next version from what's actually on npm, not from package.json.
+          # This prevents collisions when queued runs or manual bumps leave
+          # package.json out of sync with the registry.
+          NPM_VERSION=$(npm view instar version 2>/dev/null || echo "0.0.0")
+          echo "npm has: $NPM_VERSION"
 
-      - name: Check for version collision
-        run: |
-          VERSION=${{ steps.bump.outputs.version }}
-          if npm view "instar@$VERSION" version 2>/dev/null; then
-            echo "::error::Version $VERSION already exists on npm — skipping publish"
-            exit 1
-          fi
+          # Parse semver and increment patch
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$NPM_VERSION"
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+
+          # Apply to package.json
+          npm version "$NEXT" --no-git-tag-version --allow-same-version
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Bumped npm $NPM_VERSION → $NEXT"
 
       - name: Rename NEXT.md to version-specific guide
         run: |

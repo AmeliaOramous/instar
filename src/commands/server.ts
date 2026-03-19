@@ -942,8 +942,11 @@ function wireTelegramRouting(
         sessionManager.injectTelegramMessage(
           targetSession, topicId, text, pipeline.topicName, pipeline.sender.firstName, pipeline.sender.telegramUserId,
         );
-        // Delivery confirmation — let the user know the message reached the session
-        telegram.sendToTopic(topicId, `✓ Delivered`).catch(() => {});
+        // Delivery confirmation — only when WE own polling. When lifeline owns
+        // polling (--no-telegram / standby), it already sends its own confirmation.
+        if (telegram.isPolling) {
+          telegram.sendToTopic(topicId, `✓ Delivered`).catch(() => {});
+        }
         // Track for stall detection
         telegram.trackMessageInjection(topicId, targetSession, text);
       } else {
