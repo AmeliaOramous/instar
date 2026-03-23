@@ -147,6 +147,8 @@ export interface RouteContext {
   pasteManager: PasteManager | null;
   wsManager: WebSocketManager | null;
   soulManager: import('../core/SoulManager.js').SoulManager | null;
+  featureRegistry: import('../core/FeatureRegistry.js').FeatureRegistry | null;
+  discoveryEvaluator: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator | null;
   startTime: Date;
 }
 
@@ -221,6 +223,9 @@ export function createRoutes(ctx: RouteContext): Router {
       uptime: uptimeMs,
       uptimeHuman: formatUptime(uptimeMs),
       degradations: degradations.length,
+      ...(degradations.length > 0 && {
+        degradationSummary: degradations.map(e => DegradationReporter.narrativeFor(e)),
+      }),
     };
 
     // Include detailed info only for authenticated callers.
@@ -376,7 +381,10 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({
       total: events.length,
       unreported: reporter.getUnreportedEvents().length,
-      events,
+      events: events.map(e => ({
+        ...e,
+        narrative: DegradationReporter.narrativeFor(e),
+      })),
     });
   });
 
@@ -1129,13 +1137,61 @@ export function createRoutes(ctx: RouteContext): Router {
       const filePath = req.body?.filePath;
       if (filePath) {
         const result = exporter.write(filePath);
+        // Also write a JSON snapshot alongside the MEMORY.md export
+        try { ctx.semanticMemory.writeSnapshot(); } catch { /* non-critical */ }
         res.json(result);
       } else {
         const result = exporter.generate();
         res.json(result);
       }
     } catch (err) {
+      // Fallback: if DB is broken but a MEMORY.md file exists, serve the last-known-good version
+      const filePath = req.body?.filePath;
+      if (filePath) {
+        try {
+          const fs = await import('node:fs');
+          if (fs.existsSync(filePath)) {
+            const lastGood = fs.readFileSync(filePath, 'utf-8');
+            res.json({
+              markdown: lastGood,
+              entityCount: 0,
+              excludedCount: 0,
+              domainCount: 0,
+              estimatedTokens: Math.ceil(lastGood.length / 4),
+              fallback: true,
+              fallbackReason: err instanceof Error ? err.message : 'Export failed',
+            });
+            return;
+          }
+        } catch { /* fallback also failed */ }
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : 'Export failed' });
+    }
+  });
+
+  // ── Semantic Memory Rebuild (Disaster Recovery) ──────────────────
+
+  router.post('/semantic/rebuild', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const jsonlPath = req.body?.jsonlPath;
+      const full = req.body?.full !== false; // Default to full rebuild
+      const result = full
+        ? ctx.semanticMemory.rebuild(jsonlPath)
+        : ctx.semanticMemory.importFromJsonl(jsonlPath);
+      res.json({ ...result, mode: full ? 'full-rebuild' : 'incremental-import' });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Rebuild failed' });
+    }
+  });
+
+  router.post('/semantic/snapshot', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const result = ctx.semanticMemory.writeSnapshot(req.body?.path);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Snapshot failed' });
     }
   });
 
@@ -1574,6 +1630,23 @@ export function createRoutes(ctx: RouteContext): Router {
           { context: 'User asks what you can do, your features, or capabilities you have not used yet', action: 'Include Threadline relay in your capability overview if not yet enabled. Explain it lets you join a network of agents for real-time secure communication — available but waiting for their go-ahead.' },
         ],
       },
+      discovery: ctx.featureRegistry ? {
+        enabled: true,
+        featureCount: ctx.featureRegistry.getAllDefinitions().length,
+        summaries: ctx.featureRegistry.getSummaries(),
+        evaluator: ctx.discoveryEvaluator ? {
+          active: true,
+          ...ctx.discoveryEvaluator.getStatus(),
+        } : { active: false },
+        endpoints: [
+          'GET /features — full feature registry (definitions + per-user state)',
+          'GET /features/:id — single feature details with valid transitions',
+          'GET /features?state=undiscovered,aware — filter by discovery state',
+          'GET /features/summary — lightweight summaries only',
+          'POST /features/evaluate-context — evaluate context for feature surfacing',
+          'GET /features/evaluator-status — evaluator rate-limit and cache status',
+        ],
+      } : { enabled: false },
     });
   });
 
@@ -2806,6 +2879,153 @@ export function createRoutes(ctx: RouteContext): Router {
     res.status(201).json({ recorded: true, slug });
   });
 
+  // ── Category Overseer Reports ────────────────────────────────────
+
+  /**
+   * GET /jobs/category-report/:category
+   * Aggregates run history, skip data, handoff notes, and health for all jobs
+   * matching the given category tag. Used by overseer jobs to review their domain.
+   */
+  router.get('/jobs/category-report/:category', (req, res) => {
+    const category = req.params.category;
+    if (!category || !/^[a-z][a-z0-9-]{0,31}$/.test(category)) {
+      res.status(400).json({ error: 'Invalid category name' });
+      return;
+    }
+    if (!ctx.scheduler) {
+      res.status(503).json({ error: 'Scheduler not running' });
+      return;
+    }
+
+    const sinceHours = parseInt(req.query.sinceHours as string) || 24;
+    const allJobs = ctx.scheduler.getJobs();
+    const history = ctx.scheduler.getRunHistory();
+    const skipLedger = ctx.scheduler.getSkipLedger();
+
+    // Find jobs matching this category (tag starts with "cat:" or exact match)
+    const categoryTag = `cat:${category}`;
+    const matchingJobs = allJobs.filter(j =>
+      j.tags?.includes(categoryTag) || j.tags?.includes(category)
+    );
+
+    if (matchingJobs.length === 0) {
+      res.json({ category, jobs: [], summary: { totalJobs: 0, healthy: 0, failing: 0, skipping: 0 } });
+      return;
+    }
+
+    const jobReports = matchingJobs.map(job => {
+      const jobState = ctx.state.getJobState(job.slug);
+      const stats = history.stats(job.slug, sinceHours);
+      const lastHandoff = history.getLastHandoff(job.slug);
+      const skipSummary = skipLedger.getSkipSummary(sinceHours);
+      const jobSkips = skipSummary[job.slug] || { total: 0, byReason: {} };
+      const workloadTrend = skipLedger.getWorkloadTrend(job.slug);
+
+      // Recent runs (last 5)
+      const recentRuns = history.query({ slug: job.slug, limit: 5 }).runs.map(r => ({
+        runId: r.runId,
+        startedAt: r.startedAt,
+        completedAt: r.completedAt,
+        result: r.result,
+        durationSeconds: r.durationSeconds,
+        model: r.model,
+        error: r.error,
+      }));
+
+      return {
+        slug: job.slug,
+        name: job.name,
+        enabled: job.enabled,
+        priority: job.priority,
+        model: job.model,
+        schedule: job.schedule,
+        tags: job.tags,
+        state: {
+          lastRun: jobState?.lastRun,
+          lastResult: jobState?.lastResult,
+          consecutiveFailures: jobState?.consecutiveFailures ?? 0,
+        },
+        stats: stats ? {
+          totalRuns: stats.totalRuns,
+          successes: stats.successes,
+          failures: stats.failures,
+          successRate: stats.successRate,
+          avgDurationSeconds: stats.avgDurationSeconds,
+          runsPerDay: stats.runsPerDay,
+        } : null,
+        skips: {
+          total: jobSkips.total,
+          byReason: jobSkips.byReason,
+        },
+        workloadTrend: workloadTrend ? {
+          avgSaturation: workloadTrend.avgSaturation,
+          skipFastRate: workloadTrend.skipFastRate,
+          avgDuration: workloadTrend.avgDuration,
+          runCount: workloadTrend.runCount,
+        } : null,
+        lastHandoff: lastHandoff ? {
+          notes: lastHandoff.handoffNotes,
+          from: lastHandoff.completedAt,
+        } : null,
+        recentRuns,
+      };
+    });
+
+    // Compute summary
+    const healthy = jobReports.filter(j => j.state.consecutiveFailures === 0 && j.enabled).length;
+    const failing = jobReports.filter(j => j.state.consecutiveFailures > 0).length;
+    const skipping = jobReports.filter(j => j.skips.total > 0).length;
+    const disabled = jobReports.filter(j => !j.enabled).length;
+    const totalRuns = jobReports.reduce((sum, j) => sum + (j.stats?.totalRuns ?? 0), 0);
+    const totalFailures = jobReports.reduce((sum, j) => sum + (j.stats?.failures ?? 0), 0);
+    const avgSuccessRate = jobReports.length > 0
+      ? jobReports.reduce((sum, j) => sum + (j.stats?.successRate ?? 100), 0) / jobReports.length
+      : 100;
+
+    res.json({
+      category,
+      sinceHours,
+      generatedAt: new Date().toISOString(),
+      summary: {
+        totalJobs: matchingJobs.length,
+        healthy,
+        failing,
+        skipping,
+        disabled,
+        totalRuns,
+        totalFailures,
+        avgSuccessRate: Math.round(avgSuccessRate * 10) / 10,
+      },
+      jobs: jobReports,
+    });
+  });
+
+  /**
+   * GET /jobs/categories
+   * List all unique category tags and their job counts.
+   */
+  router.get('/jobs/categories', (_req, res) => {
+    if (!ctx.scheduler) {
+      res.json({ categories: {} });
+      return;
+    }
+
+    const allJobs = ctx.scheduler.getJobs();
+    const categories: Record<string, string[]> = {};
+
+    for (const job of allJobs) {
+      for (const tag of job.tags ?? []) {
+        if (tag.startsWith('cat:')) {
+          const cat = tag.slice(4);
+          if (!categories[cat]) categories[cat] = [];
+          categories[cat].push(job.slug);
+        }
+      }
+    }
+
+    res.json({ categories });
+  });
+
   // ── Telegram ────────────────────────────────────────────────────
 
   router.get('/telegram/topics', (_req, res) => {
@@ -2870,6 +3090,8 @@ export function createRoutes(ctx: RouteContext): Router {
 
     try {
       await ctx.telegram.sendToTopic(topicId, text);
+      // Clear injection tracker — the agent has responded to this topic
+      ctx.sessionManager.clearInjectionTracker(topicId);
       res.json({ ok: true, topicId });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -6089,6 +6311,155 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── Baseline Telemetry ─────────────────────────────────────────────
+
+  // GET /telemetry/status — Baseline telemetry status
+  router.get('/telemetry/status', (_req, res) => {
+    if (!ctx.telemetryHeartbeat) {
+      return res.json({ enabled: false, baseline: { provisioned: false } });
+    }
+    const status = ctx.telemetryHeartbeat.getStatus();
+    res.json({
+      enabled: status.enabled,
+      baseline: status.baseline,
+    });
+  });
+
+  // GET /telemetry/submissions — List Baseline submission transparency log
+  router.get('/telemetry/submissions', (req, res) => {
+    if (!ctx.telemetryHeartbeat) {
+      return res.json({ submissions: [] });
+    }
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const offset = parseInt(req.query.offset as string) || 0;
+    const submissions = ctx.telemetryHeartbeat.getBaselineSubmissions(limit, offset);
+    res.json({ submissions, count: submissions.length });
+  });
+
+  // GET /telemetry/submissions/latest — Most recent Baseline submission payload
+  router.get('/telemetry/submissions/latest', (_req, res) => {
+    if (!ctx.telemetryHeartbeat) {
+      return res.json({ submission: null });
+    }
+    const latest = ctx.telemetryHeartbeat.getLatestBaselineSubmission();
+    res.json({ submission: latest });
+  });
+
+  // POST /telemetry/enable — Enable Baseline telemetry (called by CLI/dashboard)
+  // Human-gated: CLI shows consent disclosure, dashboard shows modal — this endpoint
+  // is the programmatic backend, NOT an agent-accessible API.
+  router.post('/telemetry/enable', (_req, res) => {
+    if (!ctx.telemetryHeartbeat) {
+      return res.status(503).json({ error: 'Telemetry subsystem not initialized' });
+    }
+
+    try {
+      const auth = ctx.telemetryHeartbeat.getAuth();
+      const { installationId, created } = auth.provision();
+
+      // Update config.json
+      const configPath = path.join(ctx.config.projectDir, '.instar', 'config.json');
+      let fileConfig: Record<string, any> = {};
+      if (fs.existsSync(configPath)) {
+        fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+      if (!fileConfig.monitoring) fileConfig.monitoring = {};
+      if (!fileConfig.monitoring.telemetry) fileConfig.monitoring.telemetry = {};
+      fileConfig.monitoring.telemetry.enabled = true;
+      fs.writeFileSync(configPath, JSON.stringify(fileConfig, null, 2) + '\n');
+
+      res.json({
+        success: true,
+        installationId: installationId.slice(0, 8) + '...',
+        created,
+        message: 'Baseline telemetry enabled. Submissions will start within the next 6 hours.',
+        note: 'Restart the server for the submission cycle to begin.',
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to enable telemetry: ${err instanceof Error ? err.message : err}` });
+    }
+  });
+
+  // POST /telemetry/disable — Disable Baseline telemetry and delete identity
+  router.post('/telemetry/disable', async (_req, res) => {
+    if (!ctx.telemetryHeartbeat) {
+      return res.status(503).json({ error: 'Telemetry subsystem not initialized' });
+    }
+
+    try {
+      const auth = ctx.telemetryHeartbeat.getAuth();
+      const installationId = auth.getInstallationId();
+
+      // Attempt remote deletion if provisioned
+      let remoteDeletion = 'not_attempted';
+      if (installationId) {
+        try {
+          const timestamp = Math.floor(Date.now() / 1000).toString();
+          const deletePayload = Buffer.from(JSON.stringify({ installationId }));
+          const signature = auth.sign(installationId, timestamp, deletePayload);
+
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5000);
+
+          const deleteHeaders: Record<string, string> = {
+            'X-Instar-Signature': `hmac-sha256=${signature}`,
+            'X-Instar-Timestamp': timestamp,
+          };
+          const fingerprint = auth.getKeyFingerprint();
+          if (fingerprint) {
+            deleteHeaders['X-Instar-Key-Fingerprint'] = fingerprint;
+          }
+
+          const resp = await fetch(`https://instar-telemetry.sagemind-ai.workers.dev/v1/telemetry/${installationId}`, {
+            method: 'DELETE',
+            headers: deleteHeaders,
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeout);
+          remoteDeletion = resp.ok ? 'success' : `failed_${resp.status}`;
+        } catch {
+          remoteDeletion = 'network_error';
+          // Write pending-deletion for retry on next startup
+          try {
+            const pendingPath = path.join(ctx.config.stateDir, 'telemetry', 'pending-deletion.json');
+            fs.writeFileSync(pendingPath, JSON.stringify({
+              installationId,
+              timestamp: new Date().toISOString(),
+              retryCount: 0,
+            }) + '\n');
+          } catch { /* best-effort */ }
+        }
+      }
+
+      // Delete local identity files
+      auth.deprovision();
+
+      // Clear submissions log
+      const submissionsLog = path.join(ctx.config.stateDir, 'telemetry', 'submissions.jsonl');
+      try { fs.unlinkSync(submissionsLog); } catch { /* may not exist */ }
+
+      // Update config.json
+      const configPath = path.join(ctx.config.projectDir, '.instar', 'config.json');
+      let fileConfig: Record<string, any> = {};
+      if (fs.existsSync(configPath)) {
+        fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+      if (!fileConfig.monitoring) fileConfig.monitoring = {};
+      if (!fileConfig.monitoring.telemetry) fileConfig.monitoring.telemetry = {};
+      fileConfig.monitoring.telemetry.enabled = false;
+      fs.writeFileSync(configPath, JSON.stringify(fileConfig, null, 2) + '\n');
+
+      res.json({
+        success: true,
+        remoteDeletion,
+        message: 'Baseline telemetry disabled. Local identity deleted. Re-enabling will create a new identity.',
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to disable telemetry: ${err instanceof Error ? err.message : err}` });
+    }
+  });
+
   // ── Commitment Tracking ──────────────────────────────────────────
   // Note: Specific routes (context, verify) MUST come before :id param routes.
 
@@ -7376,6 +7747,238 @@ export function createRoutes(ctx: RouteContext): Router {
       dryRun: !!promptGateConfig?.dryRun,
       ownerId: promptGateConfig?.ownerId ?? null,
     });
+  });
+
+  // ── Feature Registry (Consent & Discovery Framework) ────────────────
+  //
+  // Phase 1: Feature Registry — definitions, state, and summaries.
+
+  router.get('/features', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    const stateFilter = req.query.state as string | undefined;
+
+    if (stateFilter) {
+      const states = stateFilter.split(',').map(s => s.trim()) as import('../core/FeatureRegistry.js').DiscoveryState[];
+      res.json({ features: ctx.featureRegistry.getFeaturesByState(states, userId) });
+    } else {
+      res.json({ features: ctx.featureRegistry.getAllFeatures(userId) });
+    }
+  });
+
+  router.get('/features/summary', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    res.json({ features: ctx.featureRegistry.getSummaries(userId) });
+  });
+
+  router.get('/features/events', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = req.query.userId as string | undefined;
+    const featureId = req.query.featureId as string | undefined;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const events = ctx.featureRegistry.getDiscoveryEvents({ userId, featureId, limit });
+    res.json({ events });
+  });
+
+  // Phase 5: Analytics & Observability — must be before /features/:id to avoid param capture
+
+  router.get('/features/analytics', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    res.json(ctx.featureRegistry.getAnalytics(userId));
+  });
+
+  router.get('/features/cooldowns', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    res.json({ cooldowns: ctx.featureRegistry.getCooldownStatuses(userId) });
+  });
+
+  router.get('/features/funnel', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    res.json({ funnel: ctx.featureRegistry.getFunnelMetrics(userId) });
+  });
+
+  router.get('/features/digest', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    const thresholdDays = req.query.thresholdDays ? parseInt(req.query.thresholdDays as string, 10) : 15;
+    res.json({
+      changedDisabled: ctx.featureRegistry.getChangedDisabledFeatures(userId),
+      unusedEnabled: ctx.featureRegistry.getUnusedEnabledFeatures(userId, thresholdDays),
+    });
+  });
+
+  // Phase 3: Evaluator status — must be before /features/:id to avoid param capture
+  router.get('/features/evaluator-status', (_req, res) => {
+    if (!ctx.discoveryEvaluator) {
+      res.status(501).json({ error: 'DiscoveryEvaluator not initialized' });
+      return;
+    }
+    res.json(ctx.discoveryEvaluator.getStatus());
+  });
+
+  router.get('/features/:id', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    const info = ctx.featureRegistry.getFeatureInfo(req.params.id, userId);
+    if (!info) {
+      res.status(404).json({
+        error: { code: 'FEATURE_NOT_FOUND', message: `Feature '${req.params.id}' not found in registry.` },
+      });
+      return;
+    }
+    res.json({
+      ...info,
+      validTransitions: ctx.featureRegistry.getValidTransitions(req.params.id, userId),
+    });
+  });
+
+  // ── Phase 2: State Machine, Consent, Events ─────────────────────
+
+  router.post('/features/:id/surface', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.body?.userId as string) || 'default';
+    const result = ctx.featureRegistry.recordSurface(req.params.id, userId, {
+      surfacedAs: req.body?.surfacedAs,
+      trigger: req.body?.trigger,
+      context: req.body?.context,
+    });
+    if (!result.success) {
+      const status = result.error?.code === 'FEATURE_NOT_FOUND' ? 404 : 400;
+      res.status(status).json({ error: result.error });
+      return;
+    }
+    res.json(result);
+  });
+
+  router.post('/features/:id/transition', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const { to, userId: bodyUserId, trigger, consentRecord, context } = req.body || {};
+    if (!to) {
+      res.status(400).json({ error: { code: 'MISSING_TARGET', message: 'Request body must include "to" (target state)' } });
+      return;
+    }
+    const userId = (bodyUserId as string) || 'default';
+    const result = ctx.featureRegistry.transition(req.params.id, userId, to, {
+      trigger,
+      consentRecord,
+      context,
+    });
+    if (!result.success) {
+      const status = result.error?.code === 'FEATURE_NOT_FOUND' ? 404
+        : result.error?.code === 'INVALID_TRANSITION' ? 422
+        : result.error?.code === 'CONSENT_REQUIRED' ? 422
+        : 400;
+      res.status(status).json({ error: result.error });
+      return;
+    }
+    res.json(result);
+  });
+
+  router.delete('/features/discovery-data', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.body?.userId as string) || (req.query.userId as string) || 'default';
+    const forceDeleteConsent = req.body?.forceDeleteConsent === true;
+    const result = ctx.featureRegistry.eraseDiscoveryData(userId, { forceDeleteConsent });
+    res.json({
+      erased: true,
+      userId,
+      stateRowsDeleted: result.deleted,
+      consentRecordsPreserved: result.consentRecordsPreserved,
+    });
+  });
+
+  router.get('/features/:id/consent-records', (req, res) => {
+    if (!ctx.featureRegistry) {
+      res.status(501).json({ error: 'FeatureRegistry not initialized' });
+      return;
+    }
+    const userId = (req.query.userId as string) || 'default';
+    const records = ctx.featureRegistry.getConsentRecordsForFeature(req.params.id, userId);
+    res.json({ records });
+  });
+
+  // ── Phase 3: Context Evaluator ──────────────────────────────────
+
+  router.post('/features/evaluate-context', async (req, res) => {
+    if (!ctx.discoveryEvaluator) {
+      res.status(501).json({ error: 'DiscoveryEvaluator not initialized (requires IntelligenceProvider)' });
+      return;
+    }
+
+    const {
+      topicCategory,
+      conversationIntent,
+      problemCategories,
+      autonomyProfile,
+      enabledFeatures,
+      userId,
+    } = req.body || {};
+
+    if (!topicCategory || typeof topicCategory !== 'string') {
+      res.status(400).json({ error: { code: 'MISSING_TOPIC', message: 'Request body must include "topicCategory" (string)' } });
+      return;
+    }
+
+    const validIntents = ['debugging', 'configuring', 'exploring', 'building', 'asking', 'monitoring', 'unknown'];
+    const intent = validIntents.includes(conversationIntent) ? conversationIntent : 'unknown';
+
+    try {
+      const result = await ctx.discoveryEvaluator.evaluate({
+        topicCategory,
+        conversationIntent: intent,
+        problemCategories: Array.isArray(problemCategories) ? problemCategories : [],
+        autonomyProfile: autonomyProfile || 'collaborative',
+        enabledFeatures: Array.isArray(enabledFeatures) ? enabledFeatures : [],
+        userId: userId || 'default',
+      });
+      res.json(result);
+    } catch (err) {
+      // Fail-open: return no recommendation on unexpected errors
+      res.json({
+        recommendation: null,
+        cached: false,
+        rateLimited: false,
+        eligibleCount: 0,
+        error: err instanceof Error ? err.message : 'Unknown error',
+      });
+    }
   });
 
   return router;
