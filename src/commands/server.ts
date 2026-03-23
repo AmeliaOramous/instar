@@ -1396,21 +1396,25 @@ export async function startServer(options: StartOptions): Promise<void> {
   function formatCoherenceFailure(checkName: string, message: string): string {
     switch (checkName) {
       case 'output-sanity':
-        return `Output Quality Issue — ${message}\nYour agent may be sending messages with placeholder text or internal URLs. Reply "fix output" to have the agent investigate and clean this up.`;
+        return `I noticed some of my recent messages might contain placeholder text or raw internal references. Reply "fix output" and I'll clean that up.`;
       case 'readiness-auth-token':
-        return `Security: API Unprotected — Your agent's API has no authentication token, so anyone with the URL could access it.\nReply "fix auth" to generate and apply a security token.`;
+        return `My API doesn't have an auth token set, which means anyone with the URL could access it. Reply "fix auth" to lock it down.`;
       case 'readiness-dashboard-pin':
-        return `Dashboard PIN Missing — Your dashboard doesn't have a PIN set.\nReply "fix dashboard" to generate one.`;
+        return `The dashboard doesn't have a PIN yet. Reply "fix dashboard" to set one up.`;
       case 'readiness-telegram-token':
-        return `Telegram Not Connected — Your agent's Telegram bot token is missing, so it can't send or receive messages.\nCheck your .instar/config.json messaging settings.`;
+        return `I can't connect to Telegram — the bot token is missing from my config. Check .instar/config.json to set it up.`;
       case 'config-file-valid':
-        return `Configuration Corrupt — Your agent's config file is damaged and may cause unexpected behavior.\nReply "fix config" to attempt repair.`;
-      case 'process-version-mismatch':
-        return `Update Pending — ${message}\nYour agent is running an older version than what's installed. Reply "restart" to apply the update.`;
+        return `My config file looks damaged, which might cause unexpected behavior. Reply "fix config" and I'll try to repair it.`;
+      case 'process-version-mismatch': {
+        // Extract versions from message like "Running v0.21.0 but disk has v0.21.1 — restart needed"
+        const versionMatch = message.match(/v[\d.]+/g);
+        const newVersion = versionMatch && versionMatch.length >= 2 ? versionMatch[1] : 'a newer version';
+        return `There's an update ready (${newVersion}). Reply "restart" to apply it.`;
+      }
       case 'shadow-installation':
-        return `Shadow Installation Detected — A local copy of Instar is overriding the global one, which prevents auto-updates from working.\nReply "fix shadow" to remove it.`;
+        return `A local copy of instar is overriding the global install, which blocks auto-updates. Reply "fix shadow" to remove it.`;
       case 'state-topic-registry':
-        return `Topic Registry Damaged — Your agent's topic-to-session mapping is corrupt, which may cause messages to go to the wrong session.\nReply "fix registry" to rebuild it.`;
+        return `My topic routing got corrupted — messages might be landing in the wrong threads. Reply "fix registry" to rebuild it.`;
       default:
         return `${checkName}: ${message}`;
     }
@@ -1779,7 +1783,8 @@ export async function startServer(options: StartOptions): Promise<void> {
         config.projectDir,
         config.version || 'unknown',
       );
-      telemetryHeartbeat.start();
+      // Note: .start() is deferred until after scheduler is available so
+      // TelemetryCollector can be wired for Baseline submissions.
       console.log(pc.green(`  Telemetry: enabled (${config.monitoring.telemetry.level || 'basic'} level, every ${Math.round((config.monitoring.telemetry.intervalMs || 21600000) / 3600000)}h)`));
     }
 
@@ -1883,8 +1888,35 @@ export async function startServer(options: StartOptions): Promise<void> {
 
       scheduler.start();
       console.log(pc.green('  Scheduler started'));
+
+      // Wire up Baseline TelemetryCollector now that scheduler is available
+      if (telemetryHeartbeat && scheduler) {
+        const sched = scheduler; // capture for closure narrowing
+        const { TelemetryCollector } = await import('../monitoring/TelemetryCollector.js');
+        const collector = new TelemetryCollector({
+          skipLedger: sched.getSkipLedger(),
+          runHistory: sched.getRunHistory(),
+          getJobs: () => sched.getJobs(),
+          version: config.version || 'unknown',
+          startTime: Date.now(),
+          getSessionCount24h: () => telemetryHeartbeat!.getStatus().counters.sessionsSpawned,
+          getConfig: () => config as unknown as Record<string, unknown>,
+          // Watchdog stats — lazy getter since watchdog may be initialized later
+          getWatchdogStats: (sinceMs: number) => {
+            if (!watchdog) return { interventionsTotal: 0, interventionsByLevel: {}, recoveries: 0, sessionDeaths: 0, llmGateOverrides: 0 };
+            return watchdog.getStats(sinceMs);
+          },
+        });
+        telemetryHeartbeat.setCollector(collector);
+        console.log(pc.green('  Baseline telemetry collector wired'));
+      }
     } else if (config.scheduler.enabled && !coordinator.isAwake) {
       console.log(pc.yellow('  Scheduler skipped (standby mode)'));
+    }
+
+    // Start telemetry heartbeat (deferred to here so collector can be wired first)
+    if (telemetryHeartbeat) {
+      telemetryHeartbeat.start();
     }
 
     // Set up Telegram if configured
@@ -2405,6 +2437,38 @@ export async function startServer(options: StartOptions): Promise<void> {
           console.error(`[beforeSessionKill] Failed to save resume UUID:`, err);
         }
       });
+
+      // Auto-respawn sessions that die with unanswered Telegram injections.
+      // When a session crashes or is cleaned up before replying, re-forward the
+      // user's message so it gets a fresh session and a response.
+      sessionManager.on('injectionDropped', (info: { topicId: number; sessionName: string; text: string; injectedAt: number }) => {
+        const elapsed = Date.now() - info.injectedAt;
+        // Only respawn if the injection is recent (< 10 minutes old).
+        // Stale injections may have been superseded by newer messages.
+        if (elapsed > 10 * 60_000) {
+          console.log(`[injectionDropped] Skipping respawn for topic ${info.topicId} — injection is ${Math.round(elapsed / 60_000)}m old`);
+          return;
+        }
+        console.log(`[injectionDropped] Session "${info.sessionName}" died with unanswered message for topic ${info.topicId}. Triggering respawn.`);
+        // Re-trigger the telegram-forward endpoint internally using fetch
+        fetch(`http://localhost:${config.port}/internal/telegram-forward`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${config.authToken}`,
+          },
+          body: JSON.stringify({ topicId: info.topicId, text: info.text, fromFirstName: 'User' }),
+        }).then(async (res) => {
+          if (res.ok) {
+            console.log(`[injectionDropped] Respawn successful for topic ${info.topicId}`);
+          } else {
+            const body = await res.text().catch(() => '');
+            console.error(`[injectionDropped] Respawn failed (${res.status}): ${body}`);
+          }
+        }).catch((err: Error) => {
+          console.error(`[injectionDropped] Respawn request failed:`, err.message);
+        });
+      });
     }
 
     if (scheduler) {
@@ -2775,8 +2839,7 @@ export async function startServer(options: StartOptions): Promise<void> {
         const runningSessions = sessionManager.listRunningSessions();
         if (runningSessions.length > 0) {
           notify('IMMEDIATE', 'system',
-            `Updating to v${request.targetVersion} — restarting in a few seconds. ` +
-            `${runningSessions.length} session(s) will resume after restart.`
+            `Applying update to v${request.targetVersion} — restarting now. Active sessions will resume automatically.`
           );
         } else {
           console.log(`[ForegroundRestartWatcher] Silent restart — no active sessions (v${request.previousVersion} → v${request.targetVersion})`);
@@ -2856,9 +2919,11 @@ export async function startServer(options: StartOptions): Promise<void> {
       // Alert via batcher — critical memory is IMMEDIATE, elevated is SUMMARY
       if (to !== 'normal') {
         const tier: NotificationTier = to === 'critical' ? 'IMMEDIATE' : 'SUMMARY';
-        notify(tier, 'system',
-          `Memory ${to}: ${memState.pressurePercent.toFixed(1)}% used, ${memState.freeGB.toFixed(1)}GB free (trend: ${memState.trend})`
-        );
+        const freeGb = memState.freeGB.toFixed(1);
+        const msg = to === 'critical'
+          ? `The machine is running very low on memory (only ${freeGb}GB free). I'll hold off on starting new sessions until this clears up.`
+          : `Memory is getting tight (${freeGb}GB free). I'll be conservative about spinning up new work.`;
+        notify(tier, 'system', msg);
       }
     });
     memoryMonitor.start();
@@ -2963,10 +3028,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       onIncoherence: (report) => {
         const failedChecks = report.checks.filter(c => !c.passed && !c.corrected);
         const parts = failedChecks.map(c => formatCoherenceFailure(c.name, c.message));
-        const intro = failedChecks.length === 1
-          ? 'Your agent found an issue that needs attention:'
-          : `Your agent found ${failedChecks.length} issues that need attention:`;
-        notify('SUMMARY', 'system', `${intro}\n\n${parts.join('\n\n')}`);
+        notify('SUMMARY', 'attention-update', parts.join('\n\n'));
       },
     });
     coherenceMonitor.start();
@@ -2981,7 +3043,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       liveConfig,
       onViolation: (commitment, detail) => {
         notify('IMMEDIATE', 'commitment',
-          `Commitment violated [${commitment.id}]: "${commitment.userRequest}"\n${detail}`
+          `You asked me to "${commitment.userRequest}" but it looks like that setting reverted. ${detail}`
         );
       },
       onVerified: (commitment) => {
@@ -2989,7 +3051,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       },
       onEscalation: (commitment, detail) => {
         notify('IMMEDIATE', 'commitment',
-          `BUG DETECTED — Commitment ${commitment.id} keeps drifting:\n${detail}`
+          `The change you asked for ("${commitment.userRequest}") keeps reverting — this looks like a bug I need to fix. ${detail}`
         );
       },
     });
@@ -3063,9 +3125,13 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
 
       // Notify via batcher — wake events are informational, not urgent
-      notify('DIGEST', 'system',
-        `Wake detected after ~${event.sleepDurationSeconds}s sleep. Sessions re-validated.`
-      );
+      // Only notify for long sleeps (>5 min) — short sleeps are routine and not worth mentioning
+      if (event.sleepDurationSeconds > 300) {
+        const mins = Math.round(event.sleepDurationSeconds / 60);
+        notify('DIGEST', 'system',
+          `Machine woke up after ${mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`} of sleep. Everything's reconnected and running.`
+        );
+      }
     });
     sleepWakeDetector.start();
 
@@ -3632,7 +3698,65 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, liveConfig });
+    // Feature Registry (Consent & Discovery Framework — Phase 1)
+    const { FeatureRegistry } = await import('../core/FeatureRegistry.js');
+    const { BUILTIN_FEATURES } = await import('../core/FeatureDefinitions.js');
+    const featureRegistry = new FeatureRegistry(config.stateDir, {
+      hmacKey: config.authToken || undefined,
+    });
+    await featureRegistry.open();
+    for (const def of BUILTIN_FEATURES) {
+      featureRegistry.register(def);
+    }
+    featureRegistry.bootstrap(config as unknown as Record<string, unknown>);
+    {
+      const summaries = featureRegistry.getSummaries();
+      const enabledCount = summaries.filter((f: { enabled: boolean }) => f.enabled).length;
+      console.log(pc.green(`  Feature registry: ${summaries.length} features (${enabledCount} enabled, ${summaries.length - enabledCount} undiscovered)`));
+    }
+
+    // Wire Baseline telemetry consent check to FeatureRegistry
+    if (telemetryHeartbeat) {
+      telemetryHeartbeat.setConsentChecker(() => {
+        const state = featureRegistry.getState('baseline-telemetry');
+        return state?.enabled === true;
+      });
+      console.log(pc.green('  Baseline telemetry: consent check wired to feature registry'));
+    }
+
+    // Discovery Evaluator (Consent & Discovery Framework — Phase 3)
+    let discoveryEvaluator: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator | undefined;
+    if (sharedIntelligence) {
+      const { DiscoveryEvaluator } = await import('../core/DiscoveryEvaluator.js');
+      discoveryEvaluator = new DiscoveryEvaluator(featureRegistry, sharedIntelligence);
+      console.log(pc.green('  Discovery evaluator: active (Haiku-class LLM)'));
+    } else {
+      console.log(pc.yellow('  Discovery evaluator: inactive (no IntelligenceProvider)'));
+    }
+
+    // Register feature-discovery probe for self-knowledge tree (Phase 4: Agent Integration)
+    if (selfKnowledgeTree && featureRegistry) {
+      selfKnowledgeTree.probes.register('feature-discovery', async () => {
+        const start = Date.now();
+        const summaries = featureRegistry.getSummaries();
+        const byState: Record<string, string[]> = {};
+        for (const s of summaries) {
+          (byState[s.discoveryState] ??= []).push(`${s.name} (${s.consentTier})`);
+        }
+        const lines: string[] = ['Feature Discovery Status:'];
+        for (const [state, features] of Object.entries(byState)) {
+          lines.push(`  ${state}: ${features.join(', ')}`);
+        }
+        lines.push('');
+        lines.push('Behavioral contract: max 1 feature per turn, never during frustration,');
+        lines.push('network/self-governing tier requires local tier enabled first.');
+        lines.push('Use POST /features/:id/surface to record surfacings.');
+        lines.push('Use POST /features/evaluate-context for LLM-powered recommendations.');
+        return { content: lines.join('\n'), truncated: false, elapsedMs: Date.now() - start };
+      }, { description: 'Feature discovery state and behavioral contract summary' });
+    }
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, liveConfig });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
