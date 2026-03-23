@@ -189,7 +189,7 @@ describe('Credential Migration Lifecycle (e2e)', () => {
     // Notification should fire
     await notifier.checkAndNotify(state);
     expect(notifications.length).toBeGreaterThan(0);
-    expect(notifications.some(n => n.includes('very high') || n.includes('reached the limit'))).toBe(true);
+    expect(notifications.some(n => n.includes('more selective') || n.includes('quota limit'))).toBe(true);
 
     // ── STEP 2: Simulate running sessions on Dawn's account ──
     const dawnCreds = switcher.getAccountCredentials('dawn');
@@ -390,9 +390,9 @@ describe('Credential Migration Lifecycle (e2e)', () => {
 
     // Should have notifications for warning, critical, and limit crossings
     expect(notifications.length).toBe(3); // warning, critical, limit
-    expect(notifications[0]).toContain('getting high');
-    expect(notifications[1]).toContain('very high');
-    expect(notifications[2]).toContain('reached the limit');
+    expect(notifications[0]).toContain('still plenty of room');
+    expect(notifications[1]).toContain('more selective');
+    expect(notifications[2]).toContain('quota limit');
   });
 
   it('registry file permissions maintained throughout lifecycle', async () => {
