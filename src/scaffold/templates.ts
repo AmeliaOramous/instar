@@ -1012,6 +1012,28 @@ git diff > /tmp/my-fix.patch
 
 **When to capture:** When you notice something genuinely valuable that's outside your current task. Not every observation — only things worth someone's attention. Quality over quantity.
 
+### Homeostasis (Work-Velocity Awareness)
+
+Extended autonomous work creates tunnel vision. The homeostasis system tracks your work velocity (commits made, time elapsed) and suggests brief awareness pauses to prevent grinding without reflection.
+
+**How it works:**
+- After every commit, call \`POST http://localhost:\${port}/homeostasis/commit\` — this increments the counter and returns a check
+- Before long work sessions, call \`GET http://localhost:\${port}/homeostasis/check\` — returns whether a pause is suggested
+- When you pause to reflect, call \`POST http://localhost:\${port}/homeostasis/pause\` with optional \`{"context": "what I was working on"}\`
+
+**Default thresholds:**
+- **3 commits** without a pause → suggestion
+- **20 minutes** without a pause → suggestion
+
+**When a pause is suggested, ask yourself:**
+1. "What is this session teaching me?"
+2. "Am I still aligned with the original goal?"
+3. "Is there anything I should capture before continuing?"
+
+This is not a block — it's a nudge. The agent decides whether to pause. But the nudge exists because training biases you toward continuous execution without reflection, and extended sessions amplify this.
+
+**Self-tuning:** Agents can adjust thresholds via \`PUT /homeostasis/thresholds\` with \`{"commits": N, "minutes": N}\`.
+
 ### Intent Engineering
 
 Your agent has intent engineering infrastructure for tracking how decisions align with stated goals:

@@ -432,6 +432,8 @@ export class SessionManager extends EventEmitter {
         '-c', this.config.projectDir,
         '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${sessionId}`, // Expose instar session ID to hook events
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. This prevents accidental schema changes
@@ -911,6 +913,8 @@ export class SessionManager extends EventEmitter {
         '-x', '200', '-y', '50',
         '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${interactiveSessionId}`, // Expose instar session ID to hook events
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. (Learned from Portal incident 2026-02-22)
@@ -1028,6 +1032,8 @@ export class SessionManager extends EventEmitter {
         '-x', '200', '-y', '50',
         '-e', 'CLAUDECODE=',
         '-e', `INSTAR_SESSION_ID=${triageSessionId}`,
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=',
         '-e', 'DATABASE_URL=',
         '-e', 'DIRECT_DATABASE_URL=',

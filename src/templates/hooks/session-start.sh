@@ -45,6 +45,11 @@ curl -s -X POST "http://localhost:${PORT}/reflection/session-start" \
   -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -H "Content-Type: application/json" -o /dev/null 2>/dev/null || true
 
+# Reset homeostasis state for new session (work-velocity awareness)
+curl -s -X POST "http://localhost:${PORT}/homeostasis/reset" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H "Content-Type: application/json" -o /dev/null 2>/dev/null || true
+
 # Check reflection metrics — usage-based reflection suggestion
 REFLECTION_CHECK=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
   "http://localhost:${PORT}/reflection/metrics" 2>/dev/null)

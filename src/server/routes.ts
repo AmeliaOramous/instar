@@ -20,6 +20,7 @@ import type { WriteOperation, WriteToken } from '../core/StateWriteAuthority.js'
 import { validateWriteToken, canPerformOperation } from '../core/StateWriteAuthority.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 import { ReflectionMetrics } from '../monitoring/ReflectionMetrics.js';
+import { HomeostasisMonitor } from '../monitoring/HomeostasisMonitor.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { RelationshipManager } from '../core/RelationshipManager.js';
 import type { FeedbackManager } from '../core/FeedbackManager.js';
@@ -162,6 +163,9 @@ export function createRoutes(ctx: RouteContext): Router {
 
   // Reflection metrics — usage-based reflection trigger (ported from Dawn)
   const reflectionMetrics = new ReflectionMetrics(ctx.config.stateDir);
+
+  // Homeostasis monitor — work-velocity awareness (ported from Dawn)
+  const homeostasisMonitor = new HomeostasisMonitor(ctx.config.stateDir);
 
   // Truncation detector for Telegram messages (Drop Zone integration)
   const truncationDetector = new TruncationDetector();
@@ -448,6 +452,14 @@ export function createRoutes(ctx: RouteContext): Router {
     // Track tool calls for reflection metrics
     if (payload.event === 'PostToolUse') {
       reflectionMetrics.recordToolCall();
+
+      // Track commits for homeostasis (work-velocity awareness).
+      // Detect git commit in Bash tool output — Structure > Willpower.
+      const toolName = payload.tool_name || payload.toolName || '';
+      const toolInput = payload.tool_input || payload.toolInput || '';
+      if (toolName === 'Bash' && typeof toolInput === 'string' && /git\s+commit\b/.test(toolInput)) {
+        homeostasisMonitor.recordCommit();
+      }
     }
 
     // Bridge instar session ID ↔ Claude Code session ID.
@@ -564,6 +576,44 @@ export function createRoutes(ctx: RouteContext): Router {
       minutes: typeof minutes === 'number' ? minutes : undefined,
     });
     res.json({ ok: true, thresholds: reflectionMetrics.getData().thresholds });
+  });
+
+  // ── Homeostasis Monitor (Work-Velocity Awareness) ─────────────
+  //
+  // Tracks commits and elapsed time since last pause. Suggests brief
+  // awareness checks when the agent has been grinding without reflection.
+  // Ported from Dawn's homeostasis-check.sh — the heartbeat that prevents
+  // tunnel vision during extended autonomous sessions.
+
+  router.get('/homeostasis/check', (_req, res) => {
+    const check = homeostasisMonitor.check();
+    res.json(check);
+  });
+
+  router.post('/homeostasis/commit', (_req, res) => {
+    homeostasisMonitor.recordCommit();
+    const check = homeostasisMonitor.check();
+    res.json({ ok: true, ...check });
+  });
+
+  router.post('/homeostasis/pause', (req, res) => {
+    const { context } = req.body || {};
+    homeostasisMonitor.recordPause(context);
+    res.json({ ok: true, message: 'Pause recorded. Counters reset.' });
+  });
+
+  router.post('/homeostasis/reset', (_req, res) => {
+    homeostasisMonitor.resetSession();
+    res.json({ ok: true, message: 'Homeostasis reset for new session.' });
+  });
+
+  router.put('/homeostasis/thresholds', (req, res) => {
+    const { commits, minutes } = req.body;
+    homeostasisMonitor.updateThresholds({
+      commits: typeof commits === 'number' ? commits : undefined,
+      minutes: typeof minutes === 'number' ? minutes : undefined,
+    });
+    res.json({ ok: true, thresholds: homeostasisMonitor.getData().thresholds });
   });
 
   // ── Worktree Monitoring ───────────────────────────────────────

@@ -48,6 +48,11 @@ export interface SessionManagerConfig {
   protectedSessions: string[];
   /** Patterns in tmux output that indicate session completion */
   completionPatterns: string[];
+  /** Auth token for the Instar server — passed to sessions as INSTAR_AUTH_TOKEN
+   *  so HTTP hooks can authenticate when posting events back to the server. */
+  authToken?: string;
+  /** Server port — used to construct INSTAR_SERVER_URL for HTTP hooks */
+  port?: number;
 }
 
 // ── Job Scheduling ──────────────────────────────────────────────────
