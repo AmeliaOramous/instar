@@ -2473,6 +2473,155 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ jobs, queue: ctx.scheduler.getQueue() });
   });
 
+  // ── Category Overseer Reports ────────────────────────────────────
+  // These MUST be registered before /jobs/:slug routes to avoid Express
+  // matching "categories" and "category-report" as :slug params.
+
+  /**
+   * GET /jobs/categories
+   * List all unique category tags and their job counts.
+   */
+  router.get('/jobs/categories', (_req, res) => {
+    if (!ctx.scheduler) {
+      res.json({ categories: {} });
+      return;
+    }
+
+    const allJobs = ctx.scheduler.getJobs();
+    const categories: Record<string, string[]> = {};
+
+    for (const job of allJobs) {
+      for (const tag of job.tags ?? []) {
+        if (tag.startsWith('cat:')) {
+          const cat = tag.slice(4);
+          if (!categories[cat]) categories[cat] = [];
+          categories[cat].push(job.slug);
+        }
+      }
+    }
+
+    res.json({ categories });
+  });
+
+  /**
+   * GET /jobs/category-report/:category
+   * Aggregates run history, skip data, handoff notes, and health for all jobs
+   * matching the given category tag. Used by overseer jobs to review their domain.
+   */
+  router.get('/jobs/category-report/:category', (req, res) => {
+    const category = req.params.category;
+    if (!category || !/^[a-z][a-z0-9-]{0,31}$/.test(category)) {
+      res.status(400).json({ error: 'Invalid category name' });
+      return;
+    }
+    if (!ctx.scheduler) {
+      res.status(503).json({ error: 'Scheduler not running' });
+      return;
+    }
+
+    const sinceHours = parseInt(req.query.sinceHours as string) || 24;
+    const allJobs = ctx.scheduler.getJobs();
+    const history = ctx.scheduler.getRunHistory();
+    const skipLedger = ctx.scheduler.getSkipLedger();
+
+    // Find jobs matching this category (tag starts with "cat:" or exact match)
+    const categoryTag = `cat:${category}`;
+    const matchingJobs = allJobs.filter(j =>
+      j.tags?.includes(categoryTag) || j.tags?.includes(category)
+    );
+
+    if (matchingJobs.length === 0) {
+      res.json({ category, jobs: [], summary: { totalJobs: 0, healthy: 0, failing: 0, skipping: 0 } });
+      return;
+    }
+
+    const jobReports = matchingJobs.map(job => {
+      const jobState = ctx.state.getJobState(job.slug);
+      const stats = history.stats(job.slug, sinceHours);
+      const lastHandoff = history.getLastHandoff(job.slug);
+      const skipSummary = skipLedger.getSkipSummary(sinceHours);
+      const jobSkips = skipSummary[job.slug] || { total: 0, byReason: {} };
+      const workloadTrend = skipLedger.getWorkloadTrend(job.slug);
+
+      // Recent runs (last 5)
+      const recentRuns = history.query({ slug: job.slug, limit: 5 }).runs.map(r => ({
+        runId: r.runId,
+        startedAt: r.startedAt,
+        completedAt: r.completedAt,
+        result: r.result,
+        durationSeconds: r.durationSeconds,
+        model: r.model,
+        error: r.error,
+      }));
+
+      return {
+        slug: job.slug,
+        name: job.name,
+        enabled: job.enabled,
+        priority: job.priority,
+        model: job.model,
+        schedule: job.schedule,
+        tags: job.tags,
+        state: {
+          lastRun: jobState?.lastRun,
+          lastResult: jobState?.lastResult,
+          consecutiveFailures: jobState?.consecutiveFailures ?? 0,
+        },
+        stats: stats ? {
+          totalRuns: stats.totalRuns,
+          successes: stats.successes,
+          failures: stats.failures,
+          successRate: stats.successRate,
+          avgDurationSeconds: stats.avgDurationSeconds,
+          runsPerDay: stats.runsPerDay,
+        } : null,
+        skips: {
+          total: jobSkips.total,
+          byReason: jobSkips.byReason,
+        },
+        workloadTrend: workloadTrend ? {
+          avgSaturation: workloadTrend.avgSaturation,
+          skipFastRate: workloadTrend.skipFastRate,
+          avgDuration: workloadTrend.avgDuration,
+          runCount: workloadTrend.runCount,
+        } : null,
+        lastHandoff: lastHandoff ? {
+          notes: lastHandoff.handoffNotes,
+          from: lastHandoff.completedAt,
+        } : null,
+        recentRuns,
+      };
+    });
+
+    // Compute summary
+    const healthy = jobReports.filter(j => j.state.consecutiveFailures === 0 && j.enabled).length;
+    const failing = jobReports.filter(j => j.state.consecutiveFailures > 0).length;
+    const skipping = jobReports.filter(j => j.skips.total > 0).length;
+    const disabled = jobReports.filter(j => !j.enabled).length;
+    const totalRuns = jobReports.reduce((sum, j) => sum + (j.stats?.totalRuns ?? 0), 0);
+    const totalFailures = jobReports.reduce((sum, j) => sum + (j.stats?.failures ?? 0), 0);
+    const avgSuccessRate = jobReports.length > 0
+      ? jobReports.reduce((sum, j) => sum + (j.stats?.successRate ?? 100), 0) / jobReports.length
+      : 100;
+
+    res.json({
+      category,
+      sinceHours,
+      generatedAt: new Date().toISOString(),
+      summary: {
+        totalJobs: matchingJobs.length,
+        healthy,
+        failing,
+        skipping,
+        disabled,
+        totalRuns,
+        totalFailures,
+        avgSuccessRate: Math.round(avgSuccessRate * 10) / 10,
+      },
+      jobs: jobReports,
+    });
+  });
+
   router.post('/jobs/:slug/trigger', (req, res) => {
     if (!JOB_SLUG_RE.test(req.params.slug)) {
       res.status(400).json({ error: 'Invalid job slug' });
@@ -2877,153 +3026,6 @@ export function createRoutes(ctx: RouteContext): Router {
     });
 
     res.status(201).json({ recorded: true, slug });
-  });
-
-  // ── Category Overseer Reports ────────────────────────────────────
-
-  /**
-   * GET /jobs/category-report/:category
-   * Aggregates run history, skip data, handoff notes, and health for all jobs
-   * matching the given category tag. Used by overseer jobs to review their domain.
-   */
-  router.get('/jobs/category-report/:category', (req, res) => {
-    const category = req.params.category;
-    if (!category || !/^[a-z][a-z0-9-]{0,31}$/.test(category)) {
-      res.status(400).json({ error: 'Invalid category name' });
-      return;
-    }
-    if (!ctx.scheduler) {
-      res.status(503).json({ error: 'Scheduler not running' });
-      return;
-    }
-
-    const sinceHours = parseInt(req.query.sinceHours as string) || 24;
-    const allJobs = ctx.scheduler.getJobs();
-    const history = ctx.scheduler.getRunHistory();
-    const skipLedger = ctx.scheduler.getSkipLedger();
-
-    // Find jobs matching this category (tag starts with "cat:" or exact match)
-    const categoryTag = `cat:${category}`;
-    const matchingJobs = allJobs.filter(j =>
-      j.tags?.includes(categoryTag) || j.tags?.includes(category)
-    );
-
-    if (matchingJobs.length === 0) {
-      res.json({ category, jobs: [], summary: { totalJobs: 0, healthy: 0, failing: 0, skipping: 0 } });
-      return;
-    }
-
-    const jobReports = matchingJobs.map(job => {
-      const jobState = ctx.state.getJobState(job.slug);
-      const stats = history.stats(job.slug, sinceHours);
-      const lastHandoff = history.getLastHandoff(job.slug);
-      const skipSummary = skipLedger.getSkipSummary(sinceHours);
-      const jobSkips = skipSummary[job.slug] || { total: 0, byReason: {} };
-      const workloadTrend = skipLedger.getWorkloadTrend(job.slug);
-
-      // Recent runs (last 5)
-      const recentRuns = history.query({ slug: job.slug, limit: 5 }).runs.map(r => ({
-        runId: r.runId,
-        startedAt: r.startedAt,
-        completedAt: r.completedAt,
-        result: r.result,
-        durationSeconds: r.durationSeconds,
-        model: r.model,
-        error: r.error,
-      }));
-
-      return {
-        slug: job.slug,
-        name: job.name,
-        enabled: job.enabled,
-        priority: job.priority,
-        model: job.model,
-        schedule: job.schedule,
-        tags: job.tags,
-        state: {
-          lastRun: jobState?.lastRun,
-          lastResult: jobState?.lastResult,
-          consecutiveFailures: jobState?.consecutiveFailures ?? 0,
-        },
-        stats: stats ? {
-          totalRuns: stats.totalRuns,
-          successes: stats.successes,
-          failures: stats.failures,
-          successRate: stats.successRate,
-          avgDurationSeconds: stats.avgDurationSeconds,
-          runsPerDay: stats.runsPerDay,
-        } : null,
-        skips: {
-          total: jobSkips.total,
-          byReason: jobSkips.byReason,
-        },
-        workloadTrend: workloadTrend ? {
-          avgSaturation: workloadTrend.avgSaturation,
-          skipFastRate: workloadTrend.skipFastRate,
-          avgDuration: workloadTrend.avgDuration,
-          runCount: workloadTrend.runCount,
-        } : null,
-        lastHandoff: lastHandoff ? {
-          notes: lastHandoff.handoffNotes,
-          from: lastHandoff.completedAt,
-        } : null,
-        recentRuns,
-      };
-    });
-
-    // Compute summary
-    const healthy = jobReports.filter(j => j.state.consecutiveFailures === 0 && j.enabled).length;
-    const failing = jobReports.filter(j => j.state.consecutiveFailures > 0).length;
-    const skipping = jobReports.filter(j => j.skips.total > 0).length;
-    const disabled = jobReports.filter(j => !j.enabled).length;
-    const totalRuns = jobReports.reduce((sum, j) => sum + (j.stats?.totalRuns ?? 0), 0);
-    const totalFailures = jobReports.reduce((sum, j) => sum + (j.stats?.failures ?? 0), 0);
-    const avgSuccessRate = jobReports.length > 0
-      ? jobReports.reduce((sum, j) => sum + (j.stats?.successRate ?? 100), 0) / jobReports.length
-      : 100;
-
-    res.json({
-      category,
-      sinceHours,
-      generatedAt: new Date().toISOString(),
-      summary: {
-        totalJobs: matchingJobs.length,
-        healthy,
-        failing,
-        skipping,
-        disabled,
-        totalRuns,
-        totalFailures,
-        avgSuccessRate: Math.round(avgSuccessRate * 10) / 10,
-      },
-      jobs: jobReports,
-    });
-  });
-
-  /**
-   * GET /jobs/categories
-   * List all unique category tags and their job counts.
-   */
-  router.get('/jobs/categories', (_req, res) => {
-    if (!ctx.scheduler) {
-      res.json({ categories: {} });
-      return;
-    }
-
-    const allJobs = ctx.scheduler.getJobs();
-    const categories: Record<string, string[]> = {};
-
-    for (const job of allJobs) {
-      for (const tag of job.tags ?? []) {
-        if (tag.startsWith('cat:')) {
-          const cat = tag.slice(4);
-          if (!categories[cat]) categories[cat] = [];
-          categories[cat].push(job.slug);
-        }
-      }
-    }
-
-    res.json({ categories });
   });
 
   // ── Telegram ────────────────────────────────────────────────────
