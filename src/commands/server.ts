@@ -548,6 +548,7 @@ async function respawnSessionForTopic(
   topicMemory?: TopicMemory,
   userProfile?: UserProfile,
   recoveryPrompt?: string,
+  options?: { silent?: boolean },
 ): Promise<void> {
   console.log(`[telegram→session] Session "${targetSession}" needs respawn for topic ${topicId}`);
 
@@ -578,7 +579,9 @@ async function respawnSessionForTopic(
   const newSessionName = await spawnSessionForTopic(sessionManager, telegram, topicName, topicId, effectiveMessage, topicMemory, userProfile);
 
   telegram.registerTopicSession(topicId, newSessionName, topicName);
-  await telegram.sendToTopic(topicId, `Session respawned.`);
+  if (!options?.silent) {
+    await telegram.sendToTopic(topicId, `Session respawned.`);
+  }
   console.log(`[telegram→session] Respawned "${newSessionName}" for topic ${topicId}`);
 }
 
@@ -2616,7 +2619,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             }));
           },
           sendToTopic: (topicId, text) => telegram!.sendToTopic(topicId, text),
-          respawnSession: (name, topicId) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory),
+          respawnSession: (name, topicId, options) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory, undefined, undefined, options),
           clearStallForTopic: (topicId) => telegram!.clearStallTracking(topicId),
         },
         {
@@ -2653,7 +2656,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             }));
           },
           sendToTopic: (topicId, text) => telegram!.sendToTopic(topicId, text),
-          respawnSession: (name, topicId) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory),
+          respawnSession: (name, topicId, options) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory, undefined, undefined, options),
           clearStallForTopic: (topicId) => telegram!.clearStallTracking(topicId),
           spawnTriageSession: (name, options) => sessionManager.spawnTriageSession(name, options),
           getTriageSessionUuid: (sessionName) => {

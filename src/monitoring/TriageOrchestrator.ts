@@ -967,7 +967,7 @@ export class TriageOrchestrator extends EventEmitter {
 
       case 'auto_restart':
         await this.deps.sendToTopic(topicId, prefixedMessage).catch(() => {});
-        await this.deps.respawnSession(sessionName, topicId);
+        await this.deps.respawnSession(sessionName, topicId, { silent: true });
         break;
     }
   }

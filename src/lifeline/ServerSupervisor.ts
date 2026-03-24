@@ -21,6 +21,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { detectTmuxPath } from '../core/Config.js';
+import { SleepWakeDetector } from '../core/SleepWakeDetector.js';
 
 /** Execute a shell command safely, returning stdout. */
 function shellExec(cmd: string, timeout = 5000): string {
@@ -76,6 +77,7 @@ export class ServerSupervisor extends EventEmitter {
   private slowRetryStartedAt = 0; // When slow retry mode started
   private lastCrashOutput = ''; // Last captured crash output for diagnostics
   private doctorSessionSecret: string | null = null; // HMAC secret for doctor restart requests
+  private sleepWakeDetector: SleepWakeDetector | null = null; // Detects short sleeps that gap-based detection misses
 
   constructor(options: {
     projectDir: string;
@@ -327,6 +329,23 @@ export class ServerSupervisor extends EventEmitter {
   private startHealthChecks(): void {
     if (this.healthCheckInterval) return;
 
+    // Start SleepWakeDetector to catch short sleeps (10-30s) that the gap-based
+    // detection below misses (its 2-minute threshold is too high for brief suspends).
+    // On wake, reset failure counters so stale pre-sleep failures don't cascade.
+    if (!this.sleepWakeDetector) {
+      this.sleepWakeDetector = new SleepWakeDetector();
+      this.sleepWakeDetector.on('wake', (event: { sleepDurationSeconds: number }) => {
+        console.log(`[Supervisor] SleepWakeDetector: wake after ~${event.sleepDurationSeconds}s. Resetting failure counters.`);
+        this.restartAttempts = 0;
+        this.maxRetriesExhaustedAt = 0;
+        this.consecutiveFailures = 0;
+        this.totalFailures = 0;
+        this.totalFailureWindowStart = 0;
+        this.spawnedAt = Date.now();
+      });
+      this.sleepWakeDetector.start();
+    }
+
     this.healthCheckInterval = setInterval(async () => {
       const now = Date.now();
 
@@ -404,6 +423,10 @@ export class ServerSupervisor extends EventEmitter {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+    if (this.sleepWakeDetector) {
+      this.sleepWakeDetector.stop();
+      this.sleepWakeDetector = null;
     }
   }
 
