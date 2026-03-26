@@ -2,7 +2,7 @@
 
 **Review date**: 2026-03-22
 **Version reviewed**: 0.23.17
-**Codebase size**: 556 test files, 30+ threadline source files, 25+ API endpoints
+**Codebase size**: 571 test files, 30+ threadline source files, 25+ API endpoints
 
 ---
 
@@ -149,7 +149,7 @@ Cost components with minimal config (scheduler + Telegram + memory, no coherence
 ## Synthesis Question 7: Top 3 risks of adopting Instar now
 
 ### Risk 1: `--dangerously-skip-permissions` is hardcoded
-[VERIFIED] `src/core/SessionManager.ts:382` — every interactive session runs with full permissions. The behavioral hooks (dangerous-command-guard, external-operation-gate) provide a safety net, but they're pattern-matching text, not a true permission system. A novel destructive command that doesn't match the blocklist will execute without any gate.
+[VERIFIED] `src/core/SessionManager.ts:432` — every interactive session runs with full permissions. The behavioral hooks (dangerous-command-guard, external-operation-gate) provide a safety net, but they're pattern-matching text, not a true permission system. A novel destructive command that doesn't match the blocklist will execute without any gate.
 
 **Mitigation**: The hook system is extensible — you can add custom PreToolUse hooks for vault-specific protection. But the fundamental design choice is "trust the hooks, not the permission system."
 
@@ -171,7 +171,7 @@ Cost components with minimal config (scheduler + Telegram + memory, no coherence
 
 1. **The handoff notes system is clever** [VERIFIED] (JobScheduler.ts:624-640). Jobs pass `[HANDOFF]notes[/HANDOFF]` to their next execution, creating inter-session continuity without shared memory. This is a genuinely useful pattern for scheduled jobs that build on previous results.
 
-2. **556 test files** [VERIFIED]. For a project at v0.23, this is unusually thorough. The three-tier testing standard (unit → integration → E2E) is actually enforced, not just documented. The multi-machine system alone has 14+ test files.
+2. **571 test files** [VERIFIED]. For a project at v0.23, this is unusually thorough. The three-tier testing standard (unit → integration → E2E) is actually enforced, not just documented. The multi-machine system alone has 14+ test files.
 
 3. **The threadline module is massive** [VERIFIED]. 30+ files including A2A gateway, MCP server, circuit breaker, rate limiter, presence registry, abuse detection. This is far beyond "multi-machine sync" — it's infrastructure for an agent mesh network. Features like `AgentDiscovery.ts`, `A2AGateway.ts`, `InvitationManager.ts` suggest a vision well beyond two-machine coordination.
 
@@ -181,7 +181,7 @@ Cost components with minimal config (scheduler + Telegram + memory, no coherence
 
 1. **No WhatsApp/Signal/Matrix adapter ships** despite the adapter pattern being well-defined. The `MessagingAdapter` interface exists but only Telegram is implemented. If you wanted a different messaging platform, you'd build it yourself.
 
-2. **Portal incident 2026-02-22** [VERIFIED] (SessionManager.ts:396-403). The comment about database URL isolation being "learned from Portal incident" suggests this codebase has production battle scars. Good that it's fixed, but indicates the kind of incident that happens when agents have unrestricted permissions.
+2. **Portal incident 2026-02-22** [VERIFIED] (SessionManager.ts:448-454). The comment about database URL isolation being "learned from Portal incident" suggests this codebase has production battle scars. Good that it's fixed, but indicates the kind of incident that happens when agents have unrestricted permissions.
 
 3. **Job pause is memory-only** [VERIFIED] (JobScheduler.ts:380-382). If the server restarts, all jobs resume. There's no persistent pause state. For a "MacBook takes control" workflow, this means if the LXC server restarts during your MacBook session, jobs will start running again without waiting for handoff completion.
 
@@ -193,7 +193,7 @@ Cost components with minimal config (scheduler + Telegram + memory, no coherence
 
 ### GO WITH CAVEATS
 
-Instar is a serious, well-tested framework that solves real problems (persistent sessions, scheduled jobs, multi-machine coordination, memory). It's not vaporware — the code backs up the claims with 556 test files and production-hardened patterns.
+Instar is a serious, well-tested framework that solves real problems (persistent sessions, scheduled jobs, multi-machine coordination, memory). It's not vaporware — the code backs up the claims with 571 test files and production-hardened patterns.
 
 **For the Obsidian Second Brain use case specifically:**
 

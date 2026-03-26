@@ -16,16 +16,16 @@ Instar installs 14+ behavioral hooks covering session start, dangerous command b
 | dangerous-command-guard | PreToolUse (Bash) | Blocks rm -rf, git reset --hard, destructive commands | 1512-1739 |
 | telegram-topic-context | PreToolUse | Detects unanswered user questions in topic | 1740-2102 |
 | external-operation-gate | PostToolUse | MCP tool safety gate for external calls | 2338-2592 |
-| deferral-detector | PreResponse | Anti-deferral — detects "I'll do X later" patterns | 2103-2166 |
+| deferral-detector | PreToolUse (Bash) | Anti-deferral — detects deferral patterns in outgoing commands | 2103-2166 |
 | post-action-reflection | PostToolUse | Evolution awareness — logs pattern learning | 2167-2276 |
-| external-communication-guard | PreResponse | Identity grounding before Telegram/external sends | 2277-2337 |
+| external-communication-guard | PreToolUse (Bash) | Identity grounding before Telegram/external sends | 2277-2337 |
 | scope-coherence-collector | PostToolUse | Tracks implementation depth per scope level | 2593-2708 |
-| scope-coherence-checkpoint | PreResponse | Zoom-out checkpoint before response | 2709-2847 |
-| free-text-guard | PreResponse | Blocks AskUserQuestion for passwords/free-text | 2848-2854 |
+| scope-coherence-checkpoint | Stop | Zoom-out checkpoint before response | 2709-2847 |
+| free-text-guard | PreToolUse (AskUserQuestion) | Blocks free-text input requests for passwords/tokens | 2848-2854 |
 | claim-intercept | PostToolUse | False claim detection on tool output | 2855-3074 |
-| claim-intercept-response | PreResponse | False claim detection on agent responses | 3199+ |
-| response-review | PreResponse | Coherence gate response review | 3075-3198 |
-| grounding-before-messaging | PreResponse | Identity check before external messaging | 1225 |
+| claim-intercept-response | Stop | False claim detection on agent responses | 3199+ |
+| response-review | Stop | Coherence gate response review | 3075-3198 |
+| grounding-before-messaging | PreToolUse (Bash) | Identity check before external messaging | 1225 |
 
 **HTTP observability hooks** (`src/data/http-hook-templates.ts:52-143`):
 - PostToolUse, SubagentStart, SubagentStop, Stop, WorktreeCreate, WorktreeRemove, TaskCompleted, SessionEnd, PreCompact
@@ -41,15 +41,28 @@ Instar installs 14+ behavioral hooks covering session start, dangerous command b
 ```
 rm -rf /
 rm -rf ~
-git reset --hard
-git push --force
-git clean -fd
-dd if=/dev/zero
-mkfs
-shred
+> /dev/sda
+mkfs\.
+dd if=
+:(){:|:&};:
+--accept-data-loss
+prisma migrate reset
 ```
 
-**Risky patterns** (behavior depends on safety level):
+**Risky patterns (RISKY)** — behavior depends on safety level:
+```
+rm -rf \.
+git push --force
+git push -f
+git reset --hard
+git clean -fd
+DROP TABLE
+DROP DATABASE
+TRUNCATE
+DELETE FROM
+prisma db push
+prisma migrate deploy
+```
 - Level 1 (default): Block + tell agent to ask user (exit code 2)
 - Level 2 (autonomous): Inject self-verification prompt (exit code 0, agent reasons)
 

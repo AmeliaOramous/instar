@@ -7,13 +7,13 @@ Instar spawns Claude Code as separate OS processes via tmux, with `--dangerously
 
 ## 1. Session Spawning — Claude CLI Invocation
 
-**[VERIFIED]** `src/core/SessionManager.ts:382`
+**[VERIFIED]** `src/core/SessionManager.ts:432`
 ```typescript
 const claudeArgs = ['--dangerously-skip-permissions'];
 ```
 - **Hardcoded** for all interactive sessions — NOT configurable
-- Passed to `execFileSync()` via `tmux new-session` (line 389-405)
-- Alternate: Triage sessions (line 951-1042) use `--allowedTools` + `--permission-mode dontAsk` instead
+- Passed to `execFileSync()` via `tmux new-session` (line 439-454)
+- Alternate: Triage sessions (line 1040-1120) use `--allowedTools` + `--permission-mode dontAsk` instead
 
 **Tmux command structure:**
 ```
@@ -25,7 +25,7 @@ tmux new-session -d -s {SESSION} -c {PROJECT_DIR} \
   {claudePath} --dangerously-skip-permissions -p "{prompt}"
 ```
 
-**Environment isolation (lines 393-403):**
+**Environment isolation (lines 443-454):**
 - `CLAUDECODE=` — prevents nested Claude Code detection
 - `INSTAR_SESSION_ID` — exposes session ID to hooks
 - `ANTHROPIC_API_KEY=` — cleared (agents use Claude subscription)
@@ -50,7 +50,7 @@ tmux new-session -d -s {SESSION} -c {PROJECT_DIR} \
    - Agent self-knowledge (ContextSnapshotBuilder)
    - User context (UserContextBuilder)
    - Inline context + user message assembly
-5. **Response capture** via `captureOutput()` (SessionManager.ts:624)
+5. **Response capture** via `captureOutput()` (SessionManager.ts:679)
 
 **Bootstrap message structure:**
 ```
@@ -108,7 +108,7 @@ State snapshot: {json_state}
 **[VERIFIED]** True process separation via tmux:
 - Each session = separate tmux pane + Claude process (OS-level process)
 - No threads — `SessionManager` extends `EventEmitter` for in-process coordination only
-- Process verification via `isSessionAlive()` (lines 445-469): checks `#{pane_current_command}` for 'claude' or 'node'
+- Process verification via `isSessionAlive()` (lines 492-535): checks `#{pane_current_command}` for 'claude' or 'node'
 - Protected sessions via `config.protectedSessions` exempt from zombie cleanup
 
 ---
@@ -174,8 +174,8 @@ Working Memory token budgets: knowledge=800, episodes=400, relationships=300, to
 **[VERIFIED]** Hooks are a SEPARATE layer from Claude Code's permission system:
 
 - `--dangerously-skip-permissions` skips API permission prompts
-- Behavioral hooks (PreToolUse, PostToolUse, PreResponse) run REGARDLESS
-- `dangerous-command-guard.sh` (PreToolUse on Bash): blocks `rm -rf /`, `git reset --hard`, etc.
+- Behavioral hooks (PreToolUse, PostToolUse, Stop) run REGARDLESS
+- `dangerous-command-guard.sh` (PreToolUse on Bash): always-blocks `rm -rf /`, `dd if=`, fork bombs; gates risky commands like `git reset --hard`, `git push --force`
   - Safety Level 1: Block + tell agent to ask user (exit code 2)
   - Safety Level 2: Inject self-verification prompt (exit code 0)
 - Hooks are Claude Code infrastructure, not bypassed by the permissions flag
