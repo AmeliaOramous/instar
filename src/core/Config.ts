@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mergeConfigWithSecrets } from './SecretMigrator.js';
 import os from 'node:os';
-import type { InstarConfig, SessionManagerConfig, JobSchedulerConfig, FeedbackConfig, AgentType } from './types.js';
+import type { InstarConfig, SessionManagerConfig, JobSchedulerConfig, FeedbackConfig, AgentType, AgentRuntimeKind } from './types.js';
 
 const DEFAULT_PORT = 4040;
 const DEFAULT_MAX_SESSIONS = 10;
@@ -139,12 +139,51 @@ export function detectClaudePath(): string | null {
   return null;
 }
 
+export function detectCodexPath(): string | null {
+  const home = process.env.HOME || '';
+  const candidates = [
+    path.join(home, '.local', 'bin', 'codex'),
+    '/usr/local/bin/codex',
+    '/opt/homebrew/bin/codex',
+  ];
+
+  try {
+    const npmPrefix = execFileSync('npm', ['config', 'get', 'prefix'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (npmPrefix) {
+      candidates.push(path.join(npmPrefix, 'bin', 'codex'));
+    }
+  } catch {
+    // @silent-fallback-ok — codex path detection loop
+  }
+
+  if (process.env.NVM_BIN) {
+    candidates.push(path.join(process.env.NVM_BIN, 'codex'));
+  }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const result = execFileSync('which', ['codex'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (result && fs.existsSync(result)) return result;
+  } catch {
+    // @silent-fallback-ok — codex path detection loop
+  }
+
+  return null;
+}
+
 export function detectProjectDir(startDir?: string): string {
   let dir = startDir || process.cwd();
 
-  // Walk up to find a directory with CLAUDE.md or .git
+  // Walk up to find a directory with CLAUDE.md, AGENTS.md, or .git
   while (dir !== path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, 'CLAUDE.md')) || fs.existsSync(path.join(dir, '.git'))) {
+    if (
+      fs.existsSync(path.join(dir, 'CLAUDE.md'))
+      || fs.existsSync(path.join(dir, 'AGENTS.md'))
+      || fs.existsSync(path.join(dir, '.git'))
+    ) {
       return dir;
     }
     dir = path.dirname(dir);
@@ -237,12 +276,23 @@ export function loadConfig(projectDir?: string): InstarConfig {
   }
 
   const tmuxPath = detectTmuxPath();
-  const claudePath = detectClaudePath();
+  const requestedRuntime = (fileConfig.sessions as Record<string, unknown> | undefined)?.runtime;
+  const runtime = (requestedRuntime === 'codex' ? 'codex' : 'claude') as AgentRuntimeKind;
+  const configuredRuntimePath = (fileConfig.sessions as Record<string, unknown> | undefined)?.runtimePath;
+  const legacyClaudePath = (fileConfig.sessions as Record<string, unknown> | undefined)?.claudePath;
+  const runtimePath = typeof configuredRuntimePath === 'string' && configuredRuntimePath.trim()
+    ? configuredRuntimePath.trim()
+    : runtime === 'codex'
+      ? detectCodexPath()
+      : (typeof legacyClaudePath === 'string' && legacyClaudePath.trim() ? legacyClaudePath.trim() : detectClaudePath());
 
   if (!tmuxPath) {
     throw new Error('tmux not found. Install with: brew install tmux (macOS) or apt install tmux (Linux)');
   }
-  if (!claudePath) {
+  if (!runtimePath) {
+    if (runtime === 'codex') {
+      throw new Error('Codex CLI not found. Install from: https://developers.openai.com/codex/cli');
+    }
     throw new Error('Claude CLI not found. Install from: https://docs.anthropic.com/en/docs/claude-code');
   }
 
@@ -250,7 +300,12 @@ export function loadConfig(projectDir?: string): InstarConfig {
 
   const sessions: SessionManagerConfig = {
     tmuxPath,
-    claudePath,
+    runtime,
+    runtimePath,
+    runtimeHome: typeof (fileConfig.sessions as Record<string, unknown> | undefined)?.runtimeHome === 'string'
+      ? ((fileConfig.sessions as Record<string, unknown>).runtimeHome as string)
+      : undefined,
+    claudePath: runtime === 'claude' ? runtimePath : undefined,
     projectDir: resolvedProjectDir,
     maxSessions: fileConfig.sessions?.maxSessions ?? DEFAULT_MAX_SESSIONS,
     protectedSessions: fileConfig.sessions?.protectedSessions || [`${projectName}-server`],

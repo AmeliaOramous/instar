@@ -1,10 +1,10 @@
 /**
- * TopicResumeMap — Persistent mapping from Telegram topic IDs to Claude session UUIDs.
+ * TopicResumeMap — Persistent mapping from messaging topic IDs to runtime session IDs.
  *
- * Before killing an idle interactive session, the system persists the Claude
- * session UUID so it can be resumed when the next message arrives on that topic.
- * This avoids cold-starting sessions (rebuilding context from topic history)
- * and provides seamless conversational continuity.
+ * Before killing an idle interactive session, Instar persists the runtime-native
+ * session ID so the next message on that topic can resume the same conversation.
+ * Claude uses JSONL session UUIDs under ~/.claude/projects. Codex uses session IDs
+ * stored under CODEX_HOME.
  *
  * Storage: {stateDir}/topic-resume-map.json
  * Entries auto-prune after 24 hours.
@@ -14,15 +14,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import type { AgentRuntimeKind } from './types.js';
 
 interface ResumeEntry {
-  uuid: string;
+  sessionId: string;
   savedAt: string;
   sessionName: string;
+  runtime?: AgentRuntimeKind;
+  uuid?: string;
 }
 
 interface ResumeMap {
   [topicId: string]: ResumeEntry;
+}
+
+interface RuntimeSessionInfo {
+  sessionName: string;
+  claudeSessionId?: string;
+  runtimeSessionId?: string;
 }
 
 /** Entries older than 24 hours are pruned */
@@ -32,11 +41,19 @@ export class TopicResumeMap {
   private filePath: string;
   private projectDir: string;
   private tmuxPath: string;
+  private runtime: AgentRuntimeKind;
+  private runtimeHome?: string;
 
-  constructor(stateDir: string, projectDir: string, tmuxPath?: string) {
+  constructor(
+    stateDir: string,
+    projectDir: string,
+    options: { runtime: AgentRuntimeKind; tmuxPath?: string; runtimeHome?: string },
+  ) {
     this.filePath = path.join(stateDir, 'topic-resume-map.json');
     this.projectDir = projectDir;
-    this.tmuxPath = tmuxPath || 'tmux';
+    this.tmuxPath = options.tmuxPath || 'tmux';
+    this.runtime = options.runtime;
+    this.runtimeHome = options.runtimeHome;
   }
 
   /**
@@ -53,6 +70,18 @@ export class TopicResumeMap {
    */
   private claudeProjectJsonlDir(): string {
     return path.join(os.homedir(), '.claude', 'projects', this.claudeProjectDirName());
+  }
+
+  private codexHome(): string {
+    return this.runtimeHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  }
+
+  private codexSessionsDir(): string {
+    return path.join(this.codexHome(), 'sessions');
+  }
+
+  private codexSessionIndexPath(): string {
+    return path.join(this.codexHome(), 'session_index.jsonl');
   }
 
   /**
@@ -85,10 +114,8 @@ export class TopicResumeMap {
 
       if (!latestFile) return null;
 
-      // Extract UUID from filename (format: {uuid}.jsonl)
       const basename = path.basename(latestFile.name, '.jsonl');
-      // Validate UUID format (8-4-4-4-12)
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(basename)) {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(basename)) {
         return basename;
       }
     } catch {
@@ -98,41 +125,66 @@ export class TopicResumeMap {
     return null;
   }
 
+  findLatestRuntimeSessionId(): string | null {
+    if (this.runtime === 'claude') {
+      return this.findClaudeSessionUuid();
+    }
+    return this.findLatestCodexSessionId();
+  }
+
+  findLatestRuntimeSessionIdForTopic(topicId: number): string | null {
+    if (this.runtime === 'claude') {
+      return this.findClaudeSessionUuid();
+    }
+    return this.findCodexSessionIdForTopic(topicId);
+  }
+
   /**
-   * Find the Claude session UUID for a specific tmux session.
-   *
-   * Only uses the authoritative claudeSessionId from hook events.
-   * The mtime-based heuristic was removed because it causes cross-topic
-   * contamination when multiple sessions are active — it always picks
-   * the most recent JSONL file regardless of which session it belongs to.
+   * Strict session-ID lookup for a topic.
+   * If an explicit runtime session ID is provided, validate and return it.
+   * For Codex, fall back to searching recent session logs for the topic marker.
+   * For Claude, do not guess here — callers that want the mtime heuristic should
+   * use findLatestRuntimeSessionIdForTopic() explicitly.
    */
-  findUuidForSession(tmuxSession: string, claudeSessionId?: string): string | null {
-    if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
-      return claudeSessionId;
+  findResumeSessionIdForTopic(topicId: number, runtimeSessionId?: string): string | null {
+    if (runtimeSessionId && this.runtimeSessionExists(runtimeSessionId)) {
+      return runtimeSessionId;
     }
 
-    // No authoritative source — refuse to guess. Better to fall back
-    // to thread history than resume the wrong conversation.
+    if (this.runtime === 'codex') {
+      return this.findCodexSessionIdForTopic(topicId);
+    }
+
+    return null;
+  }
+
+  /**
+   * Compatibility helper for older callers that only have an explicit runtime ID.
+   */
+  findUuidForSession(_tmuxSession: string, runtimeSessionId?: string): string | null {
+    if (runtimeSessionId && this.runtimeSessionExists(runtimeSessionId)) {
+      return runtimeSessionId;
+    }
     return null;
   }
 
   /**
    * Persist a resume mapping before killing an idle session.
    */
-  save(topicId: number, uuid: string, sessionName: string): void {
+  save(topicId: number, sessionId: string, sessionName: string): void {
     const map = this.load();
 
     map[String(topicId)] = {
-      uuid,
+      sessionId,
       savedAt: new Date().toISOString(),
       sessionName,
+      runtime: this.runtime,
     };
 
-    // Prune old entries
     const now = Date.now();
     for (const key of Object.keys(map)) {
-      const entry = map[key];
-      if (now - new Date(entry.savedAt).getTime() > MAX_AGE_MS) {
+      const entry = this.normalizeEntry(map[key]);
+      if (!entry || now - new Date(entry.savedAt).getTime() > MAX_AGE_MS) {
         delete map[key];
       }
     }
@@ -145,25 +197,23 @@ export class TopicResumeMap {
   }
 
   /**
-   * Look up a resume UUID for a topic. Returns null if not found,
-   * expired, or the JSONL file no longer exists.
+   * Look up a resume session ID for a topic. Returns null if not found,
+   * expired, or the underlying runtime session record no longer exists.
    */
   get(topicId: number): string | null {
     const map = this.load();
-    const entry = map[String(topicId)];
+    const entry = this.normalizeEntry(map[String(topicId)]);
     if (!entry) return null;
 
-    // Check age
     if (Date.now() - new Date(entry.savedAt).getTime() > MAX_AGE_MS) {
       return null;
     }
 
-    // Verify the JSONL file still exists
-    if (!this.jsonlExists(entry.uuid)) {
+    if (!this.runtimeSessionExists(entry.sessionId)) {
       return null;
     }
 
-    return entry.uuid;
+    return entry.sessionId;
   }
 
   /**
@@ -180,67 +230,60 @@ export class TopicResumeMap {
   }
 
   /**
-   * Proactive resume heartbeat: update the topic→UUID mapping for all active
-   * topic-linked sessions. Called periodically (e.g., every 60s).
-   *
-   * Uses authoritative Claude session IDs from hook events when available.
-   * Only falls back to mtime-based JSONL scanning when there's exactly one
-   * active session (no cross-topic contamination risk).
-   *
-   * @param topicSessions - Map of topicId → { sessionName, claudeSessionId? }
+   * Proactive resume heartbeat: update the topic→session mapping for all active
+   * topic-linked sessions. Called periodically (for example every 60s).
    */
-  refreshResumeMappings(topicSessions: Map<number, { sessionName: string; claudeSessionId?: string }>): void {
+  refreshResumeMappings(topicSessions: Map<number, RuntimeSessionInfo>): void {
     try {
       if (!topicSessions || topicSessions.size === 0) return;
 
       const map = this.load();
       let updated = 0;
+      const activeSessions: Array<{ topicId: number; info: RuntimeSessionInfo }> = [];
 
-      // Count how many sessions have known UUIDs vs unknown
-      const activeSessions: Array<{ topicId: number; sessionName: string; claudeSessionId?: string }> = [];
       for (const [topicId, info] of topicSessions) {
-        // Verify the tmux session is actually alive
         const hasSession = spawnSync(this.tmuxPath, ['has-session', '-t', `=${info.sessionName}`]);
         if (hasSession.status !== 0) continue;
-        activeSessions.push({ topicId, sessionName: info.sessionName, claudeSessionId: info.claudeSessionId });
+        activeSessions.push({ topicId, info });
       }
 
       if (activeSessions.length === 0) return;
 
-      for (const { topicId, sessionName, claudeSessionId } of activeSessions) {
-        let uuid: string | null = null;
+      for (const { topicId, info } of activeSessions) {
+        let sessionId = this.findResumeSessionIdForTopic(
+          topicId,
+          info.runtimeSessionId ?? info.claudeSessionId,
+        );
 
-        if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
-          // Authoritative: Claude Code reported its own session ID via hooks
-          uuid = claudeSessionId;
-        } else if (activeSessions.length === 1) {
-          // Single session fallback: mtime-based is safe when there's no ambiguity
-          uuid = this.findClaudeSessionUuid();
+        if (!sessionId && this.runtime === 'claude' && activeSessions.length === 1) {
+          sessionId = this.findClaudeSessionUuid();
         }
-        // With multiple sessions and no authoritative UUID, skip — don't guess
-
-        if (!uuid) continue;
+        if (!sessionId) continue;
 
         const topicKey = String(topicId);
-        const existingEntry = map[topicKey];
-
-        // Update if UUID changed, entry doesn't exist, or entry is stale (>2 hours)
+        const existingEntry = this.normalizeEntry(map[topicKey]);
         const entryAge = existingEntry ? Date.now() - new Date(existingEntry.savedAt).getTime() : Infinity;
-        if (!existingEntry || existingEntry.uuid !== uuid || entryAge > 2 * 60 * 60 * 1000) {
+
+        if (!existingEntry || existingEntry.sessionId !== sessionId || entryAge > 2 * 60 * 60 * 1000) {
           map[topicKey] = {
-            uuid,
+            sessionId,
             savedAt: new Date().toISOString(),
-            sessionName,
+            sessionName: info.sessionName,
+            runtime: this.runtime,
           };
           updated++;
         }
       }
 
       if (updated > 0) {
-        // Prune entries older than 24 hours that aren't active
         const activeTopicKeys = new Set(activeSessions.map(s => String(s.topicId)));
         for (const key of Object.keys(map)) {
-          if (!activeTopicKeys.has(key) && Date.now() - new Date(map[key].savedAt).getTime() > MAX_AGE_MS) {
+          const entry = this.normalizeEntry(map[key]);
+          if (!entry) {
+            delete map[key];
+            continue;
+          }
+          if (!activeTopicKeys.has(key) && Date.now() - new Date(entry.savedAt).getTime() > MAX_AGE_MS) {
             delete map[key];
           }
         }
@@ -267,15 +310,184 @@ export class TopicResumeMap {
     return {};
   }
 
-  /**
-   * Check if a JSONL file exists for the given UUID in this project's directory.
-   */
-  private jsonlExists(uuid: string): boolean {
-    const jsonlPath = path.join(this.claudeProjectJsonlDir(), `${uuid}.jsonl`);
+  private normalizeEntry(entry: ResumeEntry | undefined): ResumeEntry | null {
+    if (!entry) return null;
+
+    const sessionId = typeof entry.sessionId === 'string' && entry.sessionId
+      ? entry.sessionId
+      : typeof entry.uuid === 'string' && entry.uuid
+        ? entry.uuid
+        : null;
+
+    if (!sessionId || typeof entry.savedAt !== 'string' || typeof entry.sessionName !== 'string') {
+      return null;
+    }
+
+    return {
+      sessionId,
+      savedAt: entry.savedAt,
+      sessionName: entry.sessionName,
+      runtime: entry.runtime,
+      uuid: entry.uuid,
+    };
+  }
+
+  private runtimeSessionExists(sessionId: string): boolean {
+    if (this.runtime === 'claude') {
+      return this.claudeJsonlExists(sessionId);
+    }
+    return this.codexSessionExists(sessionId);
+  }
+
+  private claudeJsonlExists(sessionId: string): boolean {
+    const jsonlPath = path.join(this.claudeProjectJsonlDir(), `${sessionId}.jsonl`);
     try {
       return fs.existsSync(jsonlPath);
     } catch {
       return false;
     }
+  }
+
+  private readCodexSessionIndex(limit = 160): Array<{ id: string; updatedAt?: string }> {
+    const indexPath = this.codexSessionIndexPath();
+    if (!fs.existsSync(indexPath)) return [];
+
+    try {
+      const lines = fs.readFileSync(indexPath, 'utf-8')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .slice(-limit);
+
+      return lines.flatMap(line => {
+        try {
+          const parsed = JSON.parse(line) as { id?: unknown; updated_at?: unknown };
+          if (typeof parsed.id !== 'string' || !parsed.id) return [];
+          return [{
+            id: parsed.id,
+            updatedAt: typeof parsed.updated_at === 'string' ? parsed.updated_at : undefined,
+          }];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private findLatestCodexSessionId(): string | null {
+    const entries = [...this.readCodexSessionIndex(120)].reverse();
+    for (const entry of entries) {
+      if (this.codexSessionBelongsToProject(entry)) {
+        return entry.id;
+      }
+    }
+    return null;
+  }
+
+  private findCodexSessionIdForTopic(topicId: number): string | null {
+    const topicMarker = `[telegram:${topicId}]`;
+    const entries = [...this.readCodexSessionIndex(200)].reverse();
+
+    for (const entry of entries) {
+      if (!this.codexSessionBelongsToProject(entry)) continue;
+      if (this.codexSessionFileContains(entry, topicMarker)) {
+        return entry.id;
+      }
+    }
+
+    return null;
+  }
+
+  private codexSessionExists(sessionId: string): boolean {
+    const indexed = this.readCodexSessionIndex(400).find(entry => entry.id === sessionId);
+    if (indexed) {
+      return this.findCodexSessionFile(indexed) !== null;
+    }
+    return this.findCodexSessionFile({ id: sessionId }) !== null;
+  }
+
+  private codexSessionBelongsToProject(entry: { id: string; updatedAt?: string }): boolean {
+    const filePath = this.findCodexSessionFile(entry);
+    if (!filePath) return false;
+
+    try {
+      const lines = fs.readFileSync(filePath, 'utf-8').split(/\r?\n/);
+      for (const line of lines.slice(0, 10)) {
+        if (!line) continue;
+        const parsed = JSON.parse(line) as {
+          type?: unknown;
+          payload?: { cwd?: unknown };
+        };
+        if (parsed.type === 'session_meta') {
+          return parsed.payload?.cwd === this.projectDir;
+        }
+      }
+    } catch {
+      // Best effort.
+    }
+
+    return false;
+  }
+
+  private codexSessionFileContains(entry: { id: string; updatedAt?: string }, needle: string): boolean {
+    const filePath = this.findCodexSessionFile(entry);
+    if (!filePath) return false;
+
+    try {
+      return fs.readFileSync(filePath, 'utf-8').includes(needle);
+    } catch {
+      return false;
+    }
+  }
+
+  private findCodexSessionFile(entry: { id: string; updatedAt?: string }): string | null {
+    const sessionsRoot = this.codexSessionsDir();
+    if (!fs.existsSync(sessionsRoot)) return null;
+
+    const candidateDirs: string[] = [];
+    if (entry.updatedAt) {
+      const stamp = new Date(entry.updatedAt);
+      if (!Number.isNaN(stamp.getTime())) {
+        candidateDirs.push(path.join(
+          sessionsRoot,
+          String(stamp.getUTCFullYear()),
+          String(stamp.getUTCMonth() + 1).padStart(2, '0'),
+          String(stamp.getUTCDate()).padStart(2, '0'),
+        ));
+      }
+    }
+    candidateDirs.push(sessionsRoot);
+
+    for (const dir of candidateDirs) {
+      const found = this.findCodexSessionFileRecursive(dir, entry.id, dir === sessionsRoot ? 4 : 1);
+      if (found) return found;
+    }
+
+    return null;
+  }
+
+  private findCodexSessionFileRecursive(dir: string, sessionId: string, depth: number): string | null {
+    if (depth < 0 || !fs.existsSync(dir)) return null;
+
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile() && entry.name.endsWith(`-${sessionId}.jsonl`)) {
+          return fullPath;
+        }
+      }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const found = this.findCodexSessionFileRecursive(path.join(dir, entry.name), sessionId, depth - 1);
+        if (found) return found;
+      }
+    } catch {
+      // Best effort.
+    }
+
+    return null;
   }
 }

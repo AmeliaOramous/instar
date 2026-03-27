@@ -33,7 +33,7 @@ import path from 'node:path';
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { detectTmuxPath, detectClaudePath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir, getInstarVersion } from '../core/Config.js';
+import { detectTmuxPath, detectClaudePath, detectCodexPath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir, getInstarVersion } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { allocatePort, registerAgent, validateAgentName } from '../core/AgentRegistry.js';
 import { defaultIdentity } from '../scaffold/bootstrap.js';
@@ -52,7 +52,7 @@ import {
   generateSeedClaudeMd,
   generateSoulMd,
 } from '../scaffold/templates.js';
-import type { InstarConfig } from '../core/types.js';
+import type { AgentRuntimeKind, InstarConfig } from '../core/types.js';
 
 interface InitOptions {
   dir?: string;
@@ -63,6 +63,102 @@ interface InitOptions {
   standalone?: boolean;
   /** Skip prerequisite checks (for testing). When true, uses provided or default paths. */
   skipPrereqs?: boolean;
+  /** Agent runtime to scaffold. */
+  runtime?: AgentRuntimeKind;
+  /** Explicit path to the runtime CLI binary. */
+  runtimePath?: string;
+  /** Optional runtime config home (for example CODEX_HOME). */
+  runtimeHome?: string;
+}
+
+interface ResolvedRuntimeConfig {
+  runtime: AgentRuntimeKind;
+  tmuxPath: string;
+  runtimePath: string;
+  runtimeHome?: string;
+  claudePath?: string;
+  cliLabel: string;
+  launchCommand: string;
+}
+
+function normalizeRuntime(runtime?: string): AgentRuntimeKind {
+  return runtime === 'codex' ? 'codex' : 'claude';
+}
+
+async function resolveRuntimeConfig(options: InitOptions): Promise<ResolvedRuntimeConfig> {
+  const runtime = normalizeRuntime(options.runtime);
+  const runtimeHome = options.runtimeHome?.trim() || undefined;
+  const detectedTmuxPath = detectTmuxPath();
+  const detectedClaudePath = detectClaudePath();
+  const detectedCodexPath = detectCodexPath();
+
+  if (runtime === 'claude' && !options.skipPrereqs && !options.runtimePath) {
+    const prereqs = await ensurePrerequisites();
+    if (!prereqs.allMet) {
+      process.exit(1);
+    }
+
+    const tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
+    const claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
+    return {
+      runtime,
+      tmuxPath,
+      runtimePath: claudePath,
+      runtimeHome,
+      claudePath,
+      cliLabel: 'Claude CLI',
+      launchCommand: 'claude',
+    };
+  }
+
+  const tmuxPath = detectedTmuxPath || (options.skipPrereqs ? '/usr/bin/tmux' : '');
+  const runtimePath = options.runtimePath?.trim()
+    || (runtime === 'codex' ? detectedCodexPath : detectedClaudePath)
+    || (options.skipPrereqs ? (runtime === 'codex' ? '/usr/bin/codex' : '/usr/bin/claude') : '');
+
+  if (!tmuxPath) {
+    console.log(pc.red('  tmux not found.'));
+    console.log(`  Install with ${pc.cyan('apt install tmux')} or ${pc.cyan('brew install tmux')}.`);
+    process.exit(1);
+  }
+
+  if (!runtimePath && runtime === 'codex') {
+    console.log(pc.red('  Codex CLI not found.'));
+    console.log(`  Install from ${pc.cyan('https://developers.openai.com/codex/cli')}.`);
+    process.exit(1);
+  }
+
+  if (!runtimePath && runtime === 'claude') {
+    console.log(pc.red('  Claude CLI not found.'));
+    console.log(`  Install from ${pc.cyan('https://docs.anthropic.com/en/docs/claude-code')}.`);
+    process.exit(1);
+  }
+
+  return {
+    runtime,
+    tmuxPath,
+    runtimePath,
+    runtimeHome,
+    claudePath: runtime === 'claude' ? runtimePath : undefined,
+    cliLabel: runtime === 'codex' ? 'Codex CLI' : 'Claude CLI',
+    launchCommand: runtime === 'codex' ? 'codex' : 'claude',
+  };
+}
+
+function generateAgentsBridgeMd(projectName: string): string {
+  return `# AGENTS.md — ${projectName}
+
+This workspace is managed by Instar.
+
+Read these files before acting:
+
+1. \`CLAUDE.md\` for the full operating contract and project conventions, if present
+2. \`.instar/AGENT.md\` for identity
+3. \`.instar/USER.md\` for the primary human context
+4. \`.instar/MEMORY.md\` for durable memory
+
+When Instar runs this workspace under Codex, treat \`CLAUDE.md\` as the canonical project instructions when it exists unless a more specific \`AGENTS.md\` section overrides it.
+`;
 }
 
 /**
@@ -113,21 +209,7 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   console.log(pc.dim(`  Directory: ${projectDir}`));
   console.log();
 
-  // Check and install prerequisites
-  let tmuxPath: string;
-  let claudePath: string;
-
-  if (options.skipPrereqs) {
-    tmuxPath = detectTmuxPath() || '/usr/bin/tmux';
-    claudePath = detectClaudePath() || '/usr/bin/claude';
-  } else {
-    const prereqs = await ensurePrerequisites();
-    if (!prereqs.allMet) {
-      process.exit(1);
-    }
-    tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
-    claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
-  }
+  const runtimeConfig = await resolveRuntimeConfig(options);
 
   // Check if directory already exists
   if (fs.existsSync(projectDir)) {
@@ -187,8 +269,11 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
     projectName,
     port,
     sessions: {
-      tmuxPath,
-      claudePath,
+      tmuxPath: runtimeConfig.tmuxPath,
+      runtime: runtimeConfig.runtime,
+      runtimePath: runtimeConfig.runtimePath,
+      runtimeHome: runtimeConfig.runtimeHome,
+      claudePath: runtimeConfig.claudePath,
       projectDir,
       maxSessions: 10,
       protectedSessions: [`${projectName}-server`],
@@ -332,6 +417,8 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   const claudeMd = generateClaudeMd(projectName, identity.name, port, false);
   fs.writeFileSync(path.join(projectDir, 'CLAUDE.md'), claudeMd);
   console.log(`  ${pc.green('✓')} Created CLAUDE.md`);
+  fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), generateAgentsBridgeMd(projectName));
+  console.log(`  ${pc.green('✓')} Created AGENTS.md`);
 
   // Write .gitignore
   const gitignore = `# Instar per-machine state (sessions, logs, secrets)
@@ -419,6 +506,7 @@ node_modules/
   console.log(pc.bold(pc.green('  Project created!')));
   console.log();
   console.log(`  ${pc.cyan(projectName)}/`);
+  console.log(`  ├── AGENTS.md              ${pc.dim('Codex bridge instructions')}`);
   console.log(`  ├── CLAUDE.md              ${pc.dim('Agent instructions')}`);
   console.log(`  ├── .instar/`);
   console.log(`  │   ├── AGENT.md           ${pc.dim('Agent identity')}`);
@@ -436,7 +524,7 @@ node_modules/
   console.log(pc.bold('  Next steps:'));
   console.log(`  ${pc.dim('1.')} ${pc.cyan(`cd ${projectName}`)}`);
   console.log(`  ${pc.dim('2.')} ${pc.cyan('instar server start')}     ${pc.dim('Start the agent server')}`);
-  console.log(`  ${pc.dim('3.')} ${pc.cyan('claude')}                     ${pc.dim('Open a Claude session')}`);
+  console.log(`  ${pc.dim('3.')} ${pc.cyan(runtimeConfig.launchCommand)}                     ${pc.dim(`Open a ${runtimeConfig.cliLabel} session`)}`);
   console.log();
   console.log(`  Auth token: ${pc.dim(authToken.slice(0, 8) + '...' + authToken.slice(-4))}`);
   console.log(`  ${pc.dim('(full token saved in .instar/config.json — use for API calls)')}`);
@@ -465,21 +553,7 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   console.log(pc.bold(`\nInitializing instar in: ${pc.cyan(projectDir)}`));
   console.log();
 
-  // Check and install prerequisites
-  let tmuxPath: string;
-  let claudePath: string;
-
-  if (options.skipPrereqs) {
-    tmuxPath = detectTmuxPath() || '/usr/bin/tmux';
-    claudePath = detectClaudePath() || '/usr/bin/claude';
-  } else {
-    const prereqs = await ensurePrerequisites();
-    if (!prereqs.allMet) {
-      process.exit(1);
-    }
-    tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
-    claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
-  }
+  const runtimeConfig = await resolveRuntimeConfig(options);
 
   // Create state directory
   const stateDir = path.join(projectDir, '.instar');
@@ -491,8 +565,11 @@ async function initExistingProject(options: InitOptions): Promise<void> {
     projectName,
     port,
     sessions: {
-      tmuxPath,
-      claudePath,
+      tmuxPath: runtimeConfig.tmuxPath,
+      runtime: runtimeConfig.runtime,
+      runtimePath: runtimeConfig.runtimePath,
+      runtimeHome: runtimeConfig.runtimeHome,
+      claudePath: runtimeConfig.claudePath,
       projectDir,
       maxSessions: 10,
       protectedSessions: [`${projectName}-server`],
@@ -608,6 +685,10 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   if (!fs.existsSync(path.join(stateDir, 'MEMORY.md'))) {
     fs.writeFileSync(path.join(stateDir, 'MEMORY.md'), generateMemoryMd(identity.name));
     console.log(pc.green('  Created:') + ' .instar/MEMORY.md');
+  }
+  if (!fs.existsSync(path.join(projectDir, 'AGENTS.md'))) {
+    fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), generateAgentsBridgeMd(projectName));
+    console.log(pc.green('  Created:') + ' AGENTS.md');
   }
   if (!fs.existsSync(path.join(stateDir, 'soul.md'))) {
     const initDate = new Date().toISOString().split('T')[0];
@@ -784,22 +865,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
   console.log(pc.dim(`  Location: ${projectDir}`));
   console.log();
 
-  // Check prerequisites
-  let tmuxPath: string;
-  let claudePath: string;
-
-  if (options.skipPrereqs) {
-    tmuxPath = detectTmuxPath() || '/usr/bin/tmux';
-    claudePath = detectClaudePath() || '/usr/bin/claude';
-  } else {
-    const prereqs = await ensurePrerequisites();
-    if (!prereqs.allMet) {
-      console.log(pc.red('\n  Prerequisites check failed. Fix the issues above and retry.'));
-      process.exit(1);
-    }
-    tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
-    claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
-  }
+  const runtimeConfig = await resolveRuntimeConfig(options);
 
   // Auto-allocate port
   let port: number;
@@ -847,8 +913,11 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
     port,
     agentType: 'standalone',
     sessions: {
-      tmuxPath,
-      claudePath,
+      tmuxPath: runtimeConfig.tmuxPath,
+      runtime: runtimeConfig.runtime,
+      runtimePath: runtimeConfig.runtimePath,
+      runtimeHome: runtimeConfig.runtimeHome,
+      claudePath: runtimeConfig.claudePath,
       maxSessions: 10,
       protectedSessions: [`${agentName}-server`],
     },
@@ -889,6 +958,8 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
     generateClaudeMd(agentName, agentName, port, false),
   );
   console.log(`  ${pc.green('✓')} Created CLAUDE.md`);
+  fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), generateAgentsBridgeMd(agentName));
+  console.log(`  ${pc.green('✓')} Created AGENTS.md`);
 
   // Create .claude/ structure
   const claudeDir = path.join(projectDir, '.claude');
@@ -971,6 +1042,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
   console.log(pc.bold(pc.green('  Standalone agent created!')));
   console.log();
   console.log(`  ${pc.cyan(agentName)}/`);
+  console.log(`  ├── AGENTS.md              ${pc.dim('Codex bridge instructions')}`);
   console.log(`  ├── CLAUDE.md              ${pc.dim('Agent instructions')}`);
   console.log(`  ├── .instar/`);
   console.log(`  │   ├── AGENT.md           ${pc.dim('Agent identity')}`);
@@ -983,7 +1055,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
   console.log(pc.bold('  Next steps:'));
   console.log(`  ${pc.dim('1.')} ${pc.cyan(`instar server start ${agentName}`)}   ${pc.dim('Start the agent')}`);
   console.log(`  ${pc.dim('2.')} ${pc.cyan(`instar add telegram`)}               ${pc.dim('Connect Telegram')}`);
-  console.log(`  ${pc.dim('3.')} ${pc.cyan('claude')}                              ${pc.dim('Open a session')}`);
+  console.log(`  ${pc.dim('3.')} ${pc.cyan(runtimeConfig.launchCommand)}                              ${pc.dim(`Open a ${runtimeConfig.cliLabel} session`)}`);
   console.log();
   console.log(`  Auth token: ${pc.dim(authToken.slice(0, 8) + '...' + authToken.slice(-4))}`);
   console.log(`  Location: ${pc.dim(projectDir)}`);

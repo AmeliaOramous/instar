@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
-import type { InstarConfig } from '../core/types.js';
+import type { InstarConfig, Session } from '../core/types.js';
 import { rateLimiter, signViewPath } from './middleware.js';
 import type { WriteOperation, WriteToken } from '../core/StateWriteAuthority.js';
 import { validateWriteToken, canPerformOperation } from '../core/StateWriteAuthority.js';
@@ -157,6 +157,16 @@ export interface RouteContext {
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]{1,200}$/;
 const JOB_SLUG_RE = /^[a-zA-Z0-9_-]{1,100}$/;
 const VALID_SORTS = ['significance', 'recent', 'name'] as const;
+
+function getKnownRuntimeSessionId(session?: Session): string | undefined {
+  return session?.runtimeSessionId ?? session?.claudeSessionId ?? undefined;
+}
+
+function getProactiveResumeSessionIdForTopic(ctx: RouteContext, topicId: number, session?: Session): string | undefined {
+  return getKnownRuntimeSessionId(session)
+    ?? ctx.topicResumeMap?.findLatestRuntimeSessionIdForTopic(topicId)
+    ?? undefined;
+}
 
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
@@ -4548,19 +4558,19 @@ export function createRoutes(ctx: RouteContext): Router {
             reg.topicToSession[String(topicId)] = newSessionName;
             fs.writeFileSync(sdRegistryPath, JSON.stringify(reg, null, 2));
           } catch { /* @silent-fallback-ok — registry write non-critical */ }
-          // Proactive UUID save — always run, even after --resume (new session = new UUID)
+          // Proactive resume-ID save — always run, even after --resume (new session = new runtime session)
           if (ctx.topicResumeMap) {
             setTimeout(() => {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
-                if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                const resumeId = getProactiveResumeSessionIdForTopic(ctx, topicId, session);
+                if (resumeId) {
+                  ctx.topicResumeMap!.save(topicId, resumeId, newSessionName);
+                  console.log(`[secret-drop] Proactive resume ID save: ${resumeId} for topic ${topicId}`);
                 }
               } catch (err) {
-                console.error(`[secret-drop] Proactive UUID save failed:`, err);
+                console.error(`[secret-drop] Proactive resume ID save failed:`, err);
               }
             }, 8000);
           }
@@ -4837,11 +4847,10 @@ export function createRoutes(ctx: RouteContext): Router {
 
         const bootstrapMessage = `[telegram:${topicId}] ${text} (IMPORTANT: Read ${ctxPath} for thread history and Telegram relay instructions — you MUST relay your response back.)`;
 
-        // Check for a resume UUID from a previously-killed session.
-        // TopicResumeMap is authoritative — skip LLM validation for this source.
+        // Check for a resume session ID from a previously-killed session.
         let resumeSessionId = ctx.topicResumeMap?.get(topicId) ?? undefined;
         if (resumeSessionId) {
-          console.log(`[telegram-forward] Found resume UUID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
+          console.log(`[telegram-forward] Found resume session ID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
         }
 
         ctx.sessionManager.spawnInteractiveSession(bootstrapMessage, topicName, { telegramTopicId: topicId, resumeSessionId }).then((newSessionName) => {
@@ -4850,7 +4859,7 @@ export function createRoutes(ctx: RouteContext): Router {
             ctx.topicResumeMap?.remove(topicId);
           }
           // Register in-memory topic↔session mapping so beforeSessionKill
-          // can look up the topic ID and save the resume UUID on kill.
+          // can look up the topic ID and save the resume session ID on kill.
           ctx.telegram?.registerTopicSession(topicId, newSessionName, topicName);
           // Update registry on disk
           try {
@@ -4858,19 +4867,19 @@ export function createRoutes(ctx: RouteContext): Router {
             reg.topicToSession[String(topicId)] = newSessionName;
             fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2));
           } catch { /* @silent-fallback-ok — registry write non-critical */ }
-          // Proactive UUID save — always run, even after --resume (new session = new UUID)
+          // Proactive resume-ID save — always run, even after --resume.
           if (ctx.topicResumeMap) {
             setTimeout(() => {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
-                if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                const resumeId = getProactiveResumeSessionIdForTopic(ctx, topicId, session);
+                if (resumeId) {
+                  ctx.topicResumeMap!.save(topicId, resumeId, newSessionName);
+                  console.log(`[telegram-forward] Proactive resume ID save: ${resumeId} for topic ${topicId}`);
                 }
               } catch (err) {
-                console.error(`[telegram-forward] Proactive UUID save failed:`, err);
+                console.error(`[telegram-forward] Proactive resume ID save failed:`, err);
               }
             }, 8000);
           }

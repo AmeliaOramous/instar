@@ -17,6 +17,7 @@
  */
 
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -555,40 +556,221 @@ export function uninstallAutoStart(projectName: string): boolean {
   const platform = process.platform;
 
   if (platform === 'darwin') {
-    const label = `ai.instar.${projectName}`;
-    const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+    let removed = false;
+    for (const record of getLaunchAgentRecords(projectName)) {
+      try {
+        execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, record.path], { stdio: 'ignore' });
+      } catch { /* not loaded */ }
 
-    // Unload if loaded
-    try {
-      execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, plistPath], { stdio: 'ignore' });
-    } catch { /* not loaded */ }
-
-    // Remove file
-    try {
-      fs.unlinkSync(plistPath);
-      return true;
-    } catch {
-      return false;
+      try {
+        fs.unlinkSync(record.path);
+        removed = true;
+      } catch { /* not installed */ }
     }
+    return removed;
   } else if (platform === 'linux') {
-    const serviceName = `instar-${projectName}.service`;
-    const servicePath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
+    let removed = false;
+    for (const record of getSystemdServiceRecords(projectName)) {
+      try {
+        execFileSync('systemctl', ['--user', 'disable', record.name], { stdio: 'ignore' });
+        execFileSync('systemctl', ['--user', 'stop', record.name], { stdio: 'ignore' });
+      } catch { /* not loaded */ }
 
-    try {
-      execFileSync('systemctl', ['--user', 'disable', serviceName], { stdio: 'ignore' });
-      execFileSync('systemctl', ['--user', 'stop', serviceName], { stdio: 'ignore' });
-    } catch { /* not loaded */ }
-
-    try {
-      fs.unlinkSync(servicePath);
-      execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
-      return true;
-    } catch {
-      return false;
+      try {
+        fs.unlinkSync(record.path);
+        removed = true;
+      } catch { /* not installed */ }
     }
+
+    if (removed) {
+      try {
+        execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
+      } catch { /* best effort */ }
+    }
+
+    return removed;
   }
 
   return false;
+}
+
+export interface LinuxLingerStatus {
+  user: string;
+  enabled: boolean | null;
+  hint?: string;
+}
+
+export interface AutoStartStatus {
+  installed: boolean;
+  platform: NodeJS.Platform;
+  mode: 'launchd' | 'systemd-user' | null;
+  name?: string;
+  path?: string;
+  linger?: LinuxLingerStatus;
+}
+
+interface AutoStartRecord {
+  name: string;
+  path: string;
+}
+
+function buildAutoStartSlug(projectName: string): string {
+  const base = projectName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/g, '') || 'agent';
+
+  const hash = createHash('sha1').update(projectName).digest('hex').slice(0, 8);
+  return `${base}-${hash}`;
+}
+
+function uniqueAutoStartRecords(records: AutoStartRecord[]): AutoStartRecord[] {
+  const seen = new Set<string>();
+  const unique: AutoStartRecord[] = [];
+  for (const record of records) {
+    if (seen.has(record.path)) continue;
+    seen.add(record.path);
+    unique.push(record);
+  }
+  return unique;
+}
+
+function getLaunchAgentRecords(projectName: string): AutoStartRecord[] {
+  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
+  const slug = buildAutoStartSlug(projectName);
+  return uniqueAutoStartRecords([
+    {
+      name: `ai.instar.${slug}`,
+      path: path.join(launchAgentsDir, `ai.instar.${slug}.plist`),
+    },
+    {
+      name: `ai.instar.${projectName}`,
+      path: path.join(launchAgentsDir, `ai.instar.${projectName}.plist`),
+    },
+  ]);
+}
+
+function getSystemdServiceRecords(projectName: string): AutoStartRecord[] {
+  const serviceDir = path.join(os.homedir(), '.config', 'systemd', 'user');
+  const slug = buildAutoStartSlug(projectName);
+  return uniqueAutoStartRecords([
+    {
+      name: `instar-${slug}.service`,
+      path: path.join(serviceDir, `instar-${slug}.service`),
+    },
+    {
+      name: `instar-${projectName}.service`,
+      path: path.join(serviceDir, `instar-${projectName}.service`),
+    },
+  ]);
+}
+
+function findInstalledAutoStartRecord(records: AutoStartRecord[]): AutoStartRecord | null {
+  for (const record of records) {
+    if (fs.existsSync(record.path)) return record;
+  }
+  return null;
+}
+
+function escapeSystemdValue(value: string): string {
+  return value.replace(/%/g, '%%');
+}
+
+function quoteSystemdArg(value: string): string {
+  const escaped = escapeSystemdValue(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+
+  return /^[A-Za-z0-9_@:+,./-]+$/.test(value) ? escaped : `"${escaped}"`;
+}
+
+function quoteSystemdValue(value: string): string {
+  const escaped = escapeSystemdValue(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+
+  return /[\s"]/u.test(value) ? `"${escaped}"` : escaped;
+}
+
+function buildSystemdExecStart(argv: string[]): string {
+  return argv.map(quoteSystemdArg).join(' ');
+}
+
+export function getLinuxLingerStatus(username: string = os.userInfo().username): LinuxLingerStatus {
+  const hint = `For boot without interactive login, run: sudo loginctl enable-linger ${username}`;
+
+  if (process.platform !== 'linux') {
+    return { user: username, enabled: null };
+  }
+
+  try {
+    const output = execFileSync('loginctl', ['show-user', username, '-p', 'Linger', '--value'], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 5000,
+    }).trim().toLowerCase();
+
+    if (output === 'yes') {
+      return { user: username, enabled: true, hint };
+    }
+    if (output === 'no') {
+      return { user: username, enabled: false, hint };
+    }
+  } catch {
+    // Fall through to file-based probe.
+  }
+
+  try {
+    if (fs.existsSync(path.join('/var/lib/systemd/linger', username))) {
+      return { user: username, enabled: true, hint };
+    }
+  } catch {
+    // Best-effort probe.
+  }
+
+  return {
+    user: username,
+    enabled: null,
+    hint: `${hint} (linger status could not be detected automatically)`,
+  };
+}
+
+export function getAutoStartStatus(projectName: string): AutoStartStatus {
+  if (process.platform === 'darwin') {
+    const records = getLaunchAgentRecords(projectName);
+    const installedRecord = findInstalledAutoStartRecord(records);
+    const preferredRecord = installedRecord ?? records[0];
+    return {
+      installed: !!installedRecord,
+      platform: process.platform,
+      mode: 'launchd',
+      name: preferredRecord.name,
+      path: preferredRecord.path,
+    };
+  }
+
+  if (process.platform === 'linux') {
+    const records = getSystemdServiceRecords(projectName);
+    const installedRecord = findInstalledAutoStartRecord(records);
+    const preferredRecord = installedRecord ?? records[0];
+    return {
+      installed: !!installedRecord,
+      platform: process.platform,
+      mode: 'systemd-user',
+      name: preferredRecord.name,
+      path: preferredRecord.path,
+      linger: getLinuxLingerStatus(),
+    };
+  }
+
+  return {
+    installed: false,
+    platform: process.platform,
+    mode: null,
+  };
 }
 
 function findNodePath(): string {
@@ -983,9 +1165,7 @@ child.on('error', (err) => {
 }
 
 function installMacOSLaunchAgent(projectName: string, projectDir: string, hasTelegram: boolean): boolean {
-  const label = `ai.instar.${projectName}`;
-  const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
-  const plistPath = path.join(launchAgentsDir, `${label}.plist`);
+  const [record, ...legacyRecords] = getLaunchAgentRecords(projectName);
   const logDir = path.join(projectDir, '.instar', 'logs');
 
   // Install boot wrappers that resolve shadow install at startup time.
@@ -1017,7 +1197,7 @@ function installMacOSLaunchAgent(projectName: string, projectDir: string, hasTel
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>${escapeXml(label)}</string>
+    <string>${escapeXml(record.name)}</string>
     <key>ProgramArguments</key>
     <array>
 ${argsXml}
@@ -1043,17 +1223,26 @@ ${argsXml}
 </plist>`;
 
   try {
-    fs.mkdirSync(launchAgentsDir, { recursive: true });
+    for (const legacy of legacyRecords) {
+      try {
+        execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, legacy.path], { stdio: 'ignore' });
+      } catch { /* not loaded */ }
+      try {
+        fs.unlinkSync(legacy.path);
+      } catch { /* already absent */ }
+    }
+
+    fs.mkdirSync(path.dirname(record.path), { recursive: true });
     fs.mkdirSync(logDir, { recursive: true });
-    fs.writeFileSync(plistPath, plist);
+    fs.writeFileSync(record.path, plist);
 
     // Load the agent
     try {
       // Unload first if already loaded
-      execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, plistPath], { stdio: 'ignore' });
+      execFileSync('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, record.path], { stdio: 'ignore' });
     } catch { /* not loaded yet — fine */ }
 
-    execFileSync('launchctl', ['bootstrap', `gui/${process.getuid?.() ?? 501}`, plistPath], { stdio: 'ignore' });
+    execFileSync('launchctl', ['bootstrap', `gui/${process.getuid?.() ?? 501}`, record.path], { stdio: 'ignore' });
     return true;
   } catch {
     return false;
@@ -1061,43 +1250,51 @@ ${argsXml}
 }
 
 function installLinuxSystemdService(projectName: string, projectDir: string, hasTelegram: boolean): boolean {
-  const serviceName = `instar-${projectName}.service`;
-  const serviceDir = path.join(os.homedir(), '.config', 'systemd', 'user');
-  const servicePath = path.join(serviceDir, serviceName);
+  const [record, ...legacyRecords] = getSystemdServiceRecords(projectName);
   const nodePath = findNodePath();
   const instarCli = findInstarCli();
-
-  const command = hasTelegram ? 'lifeline' : 'server';
-  const args = hasTelegram
-    ? `${instarCli} lifeline start --dir ${projectDir}`
-    : `${instarCli} server start --foreground --dir ${projectDir}`;
-
   const isNodeScript = instarCli.endsWith('.js') || instarCli.endsWith('.mjs');
-  const execStart = isNodeScript ? `${nodePath} ${args}` : args;
+  const argv = isNodeScript ? [nodePath, instarCli] : [instarCli];
+  argv.push(
+    ...(hasTelegram
+      ? ['lifeline', 'start', '--dir', projectDir]
+      : ['server', 'start', '--foreground', '--dir', projectDir]),
+  );
+  const execStart = buildSystemdExecStart(argv);
 
   const service = `[Unit]
-Description=Instar Agent - ${projectName}
+Description=${escapeSystemdValue(`Instar Agent - ${projectName}`)}
 After=network.target
 
 [Service]
 Type=simple
 ExecStart=${execStart}
-WorkingDirectory=${projectDir}
+WorkingDirectory=${quoteSystemdValue(projectDir)}
 Restart=always
 RestartSec=10
-Environment=PATH=${process.env.PATH || '/usr/local/bin:/usr/bin:/bin'}
+Environment=PATH=${quoteSystemdValue(process.env.PATH || '/usr/local/bin:/usr/bin:/bin')}
 
 [Install]
 WantedBy=default.target
 `;
 
   try {
-    fs.mkdirSync(serviceDir, { recursive: true });
-    fs.writeFileSync(servicePath, service);
+    for (const legacy of legacyRecords) {
+      try {
+        execFileSync('systemctl', ['--user', 'disable', legacy.name], { stdio: 'ignore' });
+        execFileSync('systemctl', ['--user', 'stop', legacy.name], { stdio: 'ignore' });
+      } catch { /* not loaded */ }
+      try {
+        fs.unlinkSync(legacy.path);
+      } catch { /* already absent */ }
+    }
+
+    fs.mkdirSync(path.dirname(record.path), { recursive: true });
+    fs.writeFileSync(record.path, service);
 
     execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
-    execFileSync('systemctl', ['--user', 'enable', serviceName], { stdio: 'ignore' });
-    execFileSync('systemctl', ['--user', 'start', serviceName], { stdio: 'ignore' });
+    execFileSync('systemctl', ['--user', 'enable', record.name], { stdio: 'ignore' });
+    execFileSync('systemctl', ['--user', 'start', record.name], { stdio: 'ignore' });
     return true;
   } catch {
     return false;

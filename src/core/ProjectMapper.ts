@@ -239,8 +239,8 @@ export class ProjectMapper {
       }
     } catch { /* ignore */ }
 
-    // Try CLAUDE.md or AGENT.md
-    for (const name of ['CLAUDE.md', '.instar/AGENT.md']) {
+    // Try AGENTS.md, CLAUDE.md, or AGENT.md
+    for (const name of ['AGENTS.md', 'CLAUDE.md', '.instar/AGENT.md']) {
       const filePath = path.join(this.config.projectDir, name);
       try {
         if (fs.existsSync(filePath)) {

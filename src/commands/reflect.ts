@@ -17,7 +17,7 @@ import { JobReflector } from '../core/JobReflector.js';
 import { PatternAnalyzer } from '../core/PatternAnalyzer.js';
 import { ReflectionConsolidator } from '../core/ReflectionConsolidator.js';
 import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
-import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
+import { createRuntimeIntelligenceProvider } from '../core/RuntimeIntelligenceProvider.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { DetectedPattern, PatternReport } from '../core/PatternAnalyzer.js';
 
@@ -342,28 +342,25 @@ interface ReflectRunOptions {
 
 /**
  * Resolve an IntelligenceProvider from the environment.
- * Prefers Anthropic API (faster) → Claude CLI fallback.
+ * Prefers Anthropic API (faster) → configured runtime fallback.
  */
-function resolveIntelligence(claudePath?: string): IntelligenceProvider | null {
+function resolveIntelligence(config: ReturnType<typeof loadConfig>): IntelligenceProvider | null {
   // Try Anthropic API first (explicit opt-in via env)
   const apiProvider = AnthropicIntelligenceProvider.fromEnv();
   if (apiProvider) return apiProvider;
 
-  // Fall back to Claude CLI
-  if (claudePath) return new ClaudeCliIntelligenceProvider(claudePath);
-
-  return null;
+  return createRuntimeIntelligenceProvider(config.sessions);
 }
 
 export async function runReflection(slug: string | undefined, opts: ReflectRunOptions): Promise<void> {
   const config = await loadConfig(opts.dir);
 
   // Resolve intelligence provider
-  const intelligence = resolveIntelligence(config.sessions?.claudePath);
+  const intelligence = resolveIntelligence(config);
   if (!intelligence) {
     console.log();
     console.log(pc.red('No LLM provider available for reflection.'));
-    console.log(pc.dim('  Set ANTHROPIC_API_KEY or ensure Claude CLI is installed.'));
+    console.log(pc.dim('  Set ANTHROPIC_API_KEY or ensure a supported local runtime is configured.'));
     return;
   }
 

@@ -29,17 +29,27 @@ export interface Session {
   maxDurationMinutes?: number;
   /** Claude Code's own session UUID (from hook events). Populated lazily on first hook event. */
   claudeSessionId?: string;
+  /** Generic runtime session ID used for resume/recovery across runtimes. */
+  runtimeSessionId?: string;
 }
 
 export type SessionStatus = 'starting' | 'running' | 'completed' | 'failed' | 'killed';
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 
+export type AgentRuntimeKind = 'claude' | 'codex';
+
 export interface SessionManagerConfig {
   /** Path to tmux binary */
   tmuxPath: string;
-  /** Path to claude CLI binary */
-  claudePath: string;
+  /** Which local agent runtime to launch for this agent */
+  runtime: AgentRuntimeKind;
+  /** Path to the runtime CLI binary */
+  runtimePath: string;
+  /** Optional runtime home/config directory (for example CODEX_HOME) */
+  runtimeHome?: string;
+  /** Legacy Claude CLI path retained for compatibility with Claude-only subsystems */
+  claudePath?: string;
   /** Project directory (where CLAUDE.md lives) */
   projectDir: string;
   /** Maximum concurrent sessions */

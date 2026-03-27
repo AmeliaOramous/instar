@@ -321,6 +321,9 @@ program
   .option('-d, --dir <path>', 'Project directory (default: current directory)')
   .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
   .option('--standalone', 'Create a standalone agent at ~/.instar/agents/<name>/')
+  .option('--runtime <runtime>', 'Agent runtime: claude or codex', 'claude')
+  .option('--runtime-path <path>', 'Explicit path to the runtime CLI binary')
+  .option('--runtime-home <path>', 'Optional runtime home/config directory (for example CODEX_HOME)')
   .action((projectName, opts) => {
     return initProject({ ...opts, name: projectName });
   });
@@ -1138,10 +1141,47 @@ const serverCmd = program
 serverCmd
   .command('start [name]')
   .description('Start the agent server (optional: standalone agent name)')
+  .option('--all', 'Start all registered agents')
   .option('--foreground', 'Run in foreground (default: background via tmux)')
   .option('--no-telegram', 'Skip Telegram polling (use when lifeline manages Telegram)')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (opts.all) {
+      if (name || opts.dir) {
+        console.log(pc.red('`server start --all` cannot be combined with a name or --dir.'));
+        process.exit(1);
+      }
+      if (opts.foreground) {
+        console.log(pc.red('`server start --all` cannot run in foreground mode.'));
+        process.exit(1);
+      }
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
+      }
+
+      let failures = 0;
+      console.log(pc.bold(`Starting ${agents.length} agent${agents.length === 1 ? '' : 's'}...`));
+      for (const entry of agents) {
+        console.log();
+        console.log(pc.cyan(`→ ${entry.name}`));
+        try {
+          await startServer({ dir: entry.path, telegram: opts.telegram });
+        } catch (err) {
+          failures++;
+          console.log(pc.red(`Failed to start "${entry.name}": ${err instanceof Error ? err.message : err}`));
+        }
+      }
+      if (failures > 0) {
+        process.exitCode = 1;
+        console.log();
+        console.log(pc.yellow(`${failures} agent${failures === 1 ? '' : 's'} failed to start.`));
+      }
+      return;
+    }
+
     if (name && !opts.dir) {
       // Resolve standalone agent name to directory
       const { resolveAgentDir } = await import('./core/Config.js');
@@ -1158,8 +1198,41 @@ serverCmd
 serverCmd
   .command('stop [name]')
   .description('Stop the agent server (optional: standalone agent name)')
+  .option('--all', 'Stop all registered agents')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (opts.all) {
+      if (name || opts.dir) {
+        console.log(pc.red('`server stop --all` cannot be combined with a name or --dir.'));
+        process.exit(1);
+      }
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
+      }
+
+      let failures = 0;
+      console.log(pc.bold(`Stopping ${agents.length} agent${agents.length === 1 ? '' : 's'}...`));
+      for (const entry of agents) {
+        console.log();
+        console.log(pc.cyan(`→ ${entry.name}`));
+        try {
+          await stopServer({ dir: entry.path });
+        } catch (err) {
+          failures++;
+          console.log(pc.red(`Failed to stop "${entry.name}": ${err instanceof Error ? err.message : err}`));
+        }
+      }
+      if (failures > 0) {
+        process.exitCode = 1;
+        console.log();
+        console.log(pc.yellow(`${failures} agent${failures === 1 ? '' : 's'} failed to stop.`));
+      }
+      return;
+    }
+
     if (name && !opts.dir) {
       const { resolveAgentDir } = await import('./core/Config.js');
       try {
@@ -1175,8 +1248,41 @@ serverCmd
 serverCmd
   .command('restart [name]')
   .description('Restart the agent server (handles launchd/systemd lifecycle)')
+  .option('--all', 'Restart all registered agents')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (opts.all) {
+      if (name || opts.dir) {
+        console.log(pc.red('`server restart --all` cannot be combined with a name or --dir.'));
+        process.exit(1);
+      }
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
+      }
+
+      let failures = 0;
+      console.log(pc.bold(`Restarting ${agents.length} agent${agents.length === 1 ? '' : 's'}...`));
+      for (const entry of agents) {
+        console.log();
+        console.log(pc.cyan(`→ ${entry.name}`));
+        try {
+          await restartServer({ dir: entry.path });
+        } catch (err) {
+          failures++;
+          console.log(pc.red(`Failed to restart "${entry.name}": ${err instanceof Error ? err.message : err}`));
+        }
+      }
+      if (failures > 0) {
+        process.exitCode = 1;
+        console.log();
+        console.log(pc.yellow(`${failures} agent${failures === 1 ? '' : 's'} failed to restart.`));
+      }
+      return;
+    }
+
     if (name && !opts.dir) {
       const { resolveAgentDir } = await import('./core/Config.js');
       try {
@@ -1419,6 +1525,56 @@ function showAgentList(): void {
   }
 }
 
+function getRegisteredAgentsSorted() {
+  return listAgents().sort((a, b) => {
+    const byName = a.name.localeCompare(b.name);
+    return byName !== 0 ? byName : a.path.localeCompare(b.path);
+  });
+}
+
+function printAutoStartStatusLine(
+  agentName: string,
+  status: {
+    installed: boolean;
+    platform: string;
+    mode: 'launchd' | 'systemd-user' | null;
+    name?: string;
+    path?: string;
+    linger?: { enabled: boolean | null; hint?: string };
+  },
+): void {
+  if (status.platform === 'darwin') {
+    if (status.installed) {
+      console.log(pc.green(`Auto-start is installed for "${agentName}" (macOS LaunchAgent: ${status.name})`));
+      if (status.path) console.log(pc.dim(`  Plist: ${status.path}`));
+    } else {
+      console.log(pc.yellow(`Auto-start is not installed for "${agentName}".`));
+    }
+    return;
+  }
+
+  if (status.platform === 'linux') {
+    if (status.installed) {
+      console.log(pc.green(`Auto-start is installed for "${agentName}" (systemd user service: ${status.name})`));
+      if (status.path) console.log(pc.dim(`  Service: ${status.path}`));
+    } else {
+      console.log(pc.yellow(`Auto-start is not installed for "${agentName}".`));
+    }
+
+    if (status.linger?.enabled === true) {
+      console.log(pc.dim('  Headless boot: ready (linger enabled)'));
+    } else if (status.linger?.enabled === false) {
+      console.log(pc.yellow('  Headless boot: login required unless linger is enabled'));
+      if (status.linger.hint) console.log(pc.dim(`  ${status.linger.hint}`));
+    } else if (status.linger?.hint) {
+      console.log(pc.dim(`  ${status.linger.hint}`));
+    }
+    return;
+  }
+
+  console.log(pc.yellow(`Auto-start is not supported on ${status.platform} for "${agentName}".`));
+}
+
 program
   .command('list')
   .description('List all registered agents on this machine')
@@ -1441,16 +1597,72 @@ const autostartCmd = program
 autostartCmd
   .command('install')
   .description('Install auto-start so your agent starts on login')
+  .option('--all', 'Install auto-start for all registered agents')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (opts) => {
     const { loadConfig } = await import('./core/Config.js');
-    const { installAutoStart } = await import('./commands/setup.js');
+    const { installAutoStart, getAutoStartStatus } = await import('./commands/setup.js');
+
+    if (opts.all) {
+      if (opts.dir) {
+        console.log(pc.red('`autostart install --all` cannot be combined with --dir.'));
+        process.exit(1);
+      }
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
+      }
+
+      let installedCount = 0;
+      let failures = 0;
+      let lingerWarningShown = false;
+
+      console.log(pc.bold(`Installing auto-start for ${agents.length} agent${agents.length === 1 ? '' : 's'}...`));
+      for (const entry of agents) {
+        console.log();
+        console.log(pc.cyan(`→ ${entry.name}`));
+        try {
+          const config = loadConfig(entry.path);
+          const hasTelegram = config.messaging?.some((m: { type: string }) => m.type === 'telegram') ?? false;
+          const installed = installAutoStart(config.projectName, config.projectDir, hasTelegram);
+          if (installed) {
+            installedCount++;
+            console.log(pc.green(`  Installed auto-start for "${config.projectName}".`));
+            const status = getAutoStartStatus(config.projectName);
+            if (status.platform === 'linux' && status.linger?.enabled === false && !lingerWarningShown) {
+              lingerWarningShown = true;
+              console.log(pc.yellow('  Headless boot still needs linger enabled for this Linux user.'));
+              if (status.linger.hint) console.log(pc.dim(`  ${status.linger.hint}`));
+            }
+          } else {
+            failures++;
+            console.log(pc.red(`  Failed to install auto-start for "${config.projectName}".`));
+          }
+        } catch (err) {
+          failures++;
+          console.log(pc.red(`  Failed to install auto-start for "${entry.name}": ${err instanceof Error ? err.message : err}`));
+        }
+      }
+
+      console.log();
+      console.log(pc.bold(`Installed auto-start for ${installedCount}/${agents.length} agents.`));
+      if (failures > 0) process.exitCode = 1;
+      return;
+    }
+
     const config = loadConfig(opts.dir);
     const hasTelegram = config.messaging?.some((m: { type: string }) => m.type === 'telegram') ?? false;
     const installed = installAutoStart(config.projectName, config.projectDir, hasTelegram);
     if (installed) {
       console.log(pc.green(`Auto-start installed for "${config.projectName}".`));
       console.log(pc.dim('Your agent will start automatically when you log in.'));
+      const status = getAutoStartStatus(config.projectName);
+      if (status.platform === 'linux' && status.linger?.enabled === false) {
+        console.log(pc.yellow('Headless boot still needs linger enabled for this Linux user.'));
+        if (status.linger.hint) console.log(pc.dim(status.linger.hint));
+      }
     } else {
       console.log(pc.red('Failed to install auto-start.'));
       console.log(pc.dim(`Platform: ${process.platform} — auto-start supports macOS and Linux.`));
@@ -1460,10 +1672,51 @@ autostartCmd
 autostartCmd
   .command('uninstall')
   .description('Remove auto-start')
+  .option('--all', 'Remove auto-start for all registered agents')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (opts) => {
     const { loadConfig } = await import('./core/Config.js');
     const { uninstallAutoStart } = await import('./commands/setup.js');
+
+    if (opts.all) {
+      if (opts.dir) {
+        console.log(pc.red('`autostart uninstall --all` cannot be combined with --dir.'));
+        process.exit(1);
+      }
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
+      }
+
+      let removedCount = 0;
+      let failures = 0;
+      console.log(pc.bold(`Removing auto-start for ${agents.length} agent${agents.length === 1 ? '' : 's'}...`));
+      for (const entry of agents) {
+        console.log();
+        console.log(pc.cyan(`→ ${entry.name}`));
+        try {
+          const config = loadConfig(entry.path);
+          const removed = uninstallAutoStart(config.projectName);
+          if (removed) {
+            removedCount++;
+            console.log(pc.green(`  Removed auto-start for "${config.projectName}".`));
+          } else {
+            console.log(pc.yellow(`  No auto-start found for "${config.projectName}".`));
+          }
+        } catch (err) {
+          failures++;
+          console.log(pc.red(`  Failed to remove auto-start for "${entry.name}": ${err instanceof Error ? err.message : err}`));
+        }
+      }
+
+      console.log();
+      console.log(pc.bold(`Removed auto-start for ${removedCount}/${agents.length} agents.`));
+      if (failures > 0) process.exitCode = 1;
+      return;
+    }
+
     const config = loadConfig(opts.dir);
     const removed = uninstallAutoStart(config.projectName);
     if (removed) {
@@ -1476,36 +1729,37 @@ autostartCmd
 autostartCmd
   .command('status')
   .description('Check if auto-start is installed')
+  .option('--all', 'Show auto-start status for all registered agents')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (opts) => {
     const { loadConfig } = await import('./core/Config.js');
-    const config = loadConfig(opts.dir);
-    const os = await import('node:os');
-    const fs = await import('node:fs');
-    const path = await import('node:path');
+    const { getAutoStartStatus } = await import('./commands/setup.js');
 
-    if (process.platform === 'darwin') {
-      const label = `ai.instar.${config.projectName}`;
-      const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
-      if (fs.existsSync(plistPath)) {
-        console.log(pc.green(`Auto-start is installed (macOS LaunchAgent: ${label})`));
-        console.log(pc.dim(`  Plist: ${plistPath}`));
-      } else {
-        console.log(pc.yellow('Auto-start is not installed.'));
-        console.log(pc.dim('  Install with: instar autostart install'));
+    if (opts.all) {
+      if (opts.dir) {
+        console.log(pc.red('`autostart status --all` cannot be combined with --dir.'));
+        process.exit(1);
       }
-    } else if (process.platform === 'linux') {
-      const serviceName = `instar-${config.projectName}.service`;
-      const servicePath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
-      if (fs.existsSync(servicePath)) {
-        console.log(pc.green(`Auto-start is installed (systemd user service: ${serviceName})`));
-        console.log(pc.dim(`  Service: ${servicePath}`));
-      } else {
-        console.log(pc.yellow('Auto-start is not installed.'));
-        console.log(pc.dim('  Install with: instar autostart install'));
+
+      const agents = getRegisteredAgentsSorted();
+      if (agents.length === 0) {
+        console.log(pc.yellow('No registered agents found.'));
+        return;
       }
-    } else {
-      console.log(pc.yellow(`Auto-start is not supported on ${process.platform}.`));
+
+      console.log(pc.bold(`Auto-start status for ${agents.length} agent${agents.length === 1 ? '' : 's'}:`));
+      for (const entry of agents) {
+        console.log();
+        printAutoStartStatusLine(entry.name, getAutoStartStatus(entry.name));
+      }
+      return;
+    }
+
+    const config = loadConfig(opts.dir);
+    const status = getAutoStartStatus(config.projectName);
+    printAutoStartStatusLine(config.projectName, status);
+    if (!status.installed) {
+      console.log(pc.dim('  Install with: instar autostart install'));
     }
   });
 

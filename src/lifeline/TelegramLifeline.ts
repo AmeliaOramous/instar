@@ -1258,21 +1258,27 @@ export class TelegramLifeline {
     const promptPath = path.join(stateDir, 'doctor-prompt.txt');
     fs.writeFileSync(promptPath, diagnosticPrompt, 'utf-8');
 
-    // Determine permission flag
-    const claudePath = (this.projectConfig as unknown as Record<string, unknown>).claudePath as string || 'claude';
-    const useAllowedTools = await this.supportsAllowedTools(claudePath);
+    const runtime = this.projectConfig.sessions?.runtime ?? 'claude';
+    const runtimePath = this.projectConfig.sessions?.runtimePath
+      ?? this.projectConfig.sessions?.claudePath
+      ?? (runtime === 'codex' ? 'codex' : 'claude');
+    const quotedRuntimePath = runtimePath.includes(' ') ? `"${runtimePath}"` : runtimePath;
 
-    // Build claude command with prompt piped via stdin
-    const permFlag = useAllowedTools
-      ? '--allowedTools Read,Write,Edit,Glob,Grep,Bash'
-      : '--dangerously-skip-permissions';
+    let shellCmd: string;
+    if (runtime === 'codex') {
+      shellCmd = `cat "${promptPath}" | ${quotedRuntimePath} exec --ask-for-approval never --sandbox workspace-write --skip-git-repo-check -`;
+    } else {
+      const useAllowedTools = await this.supportsAllowedTools(runtimePath);
+      const permFlag = useAllowedTools
+        ? '--allowedTools Read,Write,Edit,Glob,Grep,Bash'
+        : '--dangerously-skip-permissions';
 
-    if (!useAllowedTools) {
-      console.warn('[Lifeline] --allowedTools not available, falling back to --dangerously-skip-permissions');
+      if (!useAllowedTools) {
+        console.warn('[Lifeline] --allowedTools not available, falling back to --dangerously-skip-permissions');
+      }
+
+      shellCmd = `cat "${promptPath}" | ${quotedRuntimePath} ${permFlag} --message -`;
     }
-
-    // Use shell to pipe the prompt file to claude via --message flag
-    const shellCmd = `cat "${promptPath}" | ${claudePath} ${permFlag} --message -`;
 
     const tmuxArgs = [
       'new-session', '-d',
@@ -1286,6 +1292,9 @@ export class TelegramLifeline {
       '-e', 'DATABASE_URL_PROD=',
       '-e', 'DATABASE_URL_DEV=',
       '-e', 'DATABASE_URL_TEST=',
+      ...(runtime === 'codex' && this.projectConfig.sessions?.runtimeHome
+        ? ['-e', `CODEX_HOME=${this.projectConfig.sessions.runtimeHome}`]
+        : []),
       '/bin/sh', '-c', shellCmd,
     ];
 

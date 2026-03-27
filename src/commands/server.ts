@@ -22,8 +22,8 @@ import { JobRunHistory } from '../scheduler/JobRunHistory.js';
 import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
-import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
 import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
+import { createRuntimeIntelligenceProvider, describeRuntimeIntelligence } from '../core/RuntimeIntelligenceProvider.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { DispatchManager } from '../core/DispatchManager.js';
@@ -99,7 +99,7 @@ import { createPlatformProbes } from '../monitoring/probes/PlatformProbe.js';
 import { bootstrapThreadline } from '../threadline/ThreadlineBootstrap.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
-import type { Message, IntelligenceProvider, UserProfile, InstarConfig } from '../core/types.js';
+import type { Message, IntelligenceProvider, UserProfile, InstarConfig, AgentRuntimeKind } from '../core/types.js';
 import { UserManager } from '../users/UserManager.js';
 import { formatUserContextForSession, hasUserContext } from '../users/UserContextBuilder.js';
 import type { OrphanProcessReaper } from '../monitoring/OrphanProcessReaper.js';
@@ -306,6 +306,26 @@ let _projectDir: string = process.cwd();
 let _sharedIntelligence: import('../core/types.js').IntelligenceProvider | null = null;
 let _selfKnowledgeTree: SelfKnowledgeTree | null = null;
 
+function getKnownRuntimeSessionId(session?: import('../core/types.js').Session): string | undefined {
+  return session?.runtimeSessionId ?? session?.claudeSessionId ?? undefined;
+}
+
+function getStrictResumeSessionIdForTopic(
+  topicId: number,
+  session?: import('../core/types.js').Session,
+): string | undefined {
+  return _topicResumeMap?.findResumeSessionIdForTopic(topicId, getKnownRuntimeSessionId(session)) ?? undefined;
+}
+
+function getProactiveResumeSessionIdForTopic(
+  topicId: number,
+  session?: import('../core/types.js').Session,
+): string | undefined {
+  return getKnownRuntimeSessionId(session)
+    ?? _topicResumeMap?.findLatestRuntimeSessionIdForTopic(topicId)
+    ?? undefined;
+}
+
 async function spawnSessionForTopic(
   sessionManager: SessionManager,
   telegram: TelegramAdapter,
@@ -497,13 +517,12 @@ async function spawnSessionForTopic(
     }
   }
 
-  // Check for a resume UUID from a previously-killed session on this topic.
-  // TopicResumeMap is authoritative — it saved the UUID for this specific topic at kill time
-  // or via the refresh heartbeat. Skip LLM validation (which was failing due to JSONL sampling
-  // issues and is redundant for an authoritative source).
+  // Check for a runtime session ID from a previously-killed session on this topic.
+  // TopicResumeMap is authoritative — it saved the resume ID for this specific topic at kill time
+  // or via the refresh heartbeat.
   let resumeSessionId = _topicResumeMap?.get(topicId) ?? undefined;
   if (resumeSessionId) {
-    console.log(`[spawnSessionForTopic] Found resume UUID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
+    console.log(`[spawnSessionForTopic] Found resume session ID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
   }
 
   const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, { telegramTopicId: topicId, resumeSessionId });
@@ -513,22 +532,19 @@ async function spawnSessionForTopic(
     _topicResumeMap?.remove(topicId);
   }
 
-  // Proactive UUID save — schedule discovery after spawn.
-  // Prefer authoritative claudeSessionId from hook events (populated within seconds).
-  // Falls back to mtime-based JSONL scan only when there's no ambiguity.
+  // Proactive resume-ID save — schedule discovery after spawn.
   if (_topicResumeMap) {
     setTimeout(() => {
       try {
-        // Check if hook events have already populated the authoritative UUID
         const sessions = sessionManager.listRunningSessions();
         const session = sessions.find(s => s.tmuxSession === newSessionName);
-        const uuid = session?.claudeSessionId ?? _topicResumeMap!.findClaudeSessionUuid();
-        if (uuid) {
-          _topicResumeMap!.save(topicId, uuid, newSessionName);
-          console.log(`[spawnSessionForTopic] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+        const resumeId = getProactiveResumeSessionIdForTopic(topicId, session);
+        if (resumeId) {
+          _topicResumeMap!.save(topicId, resumeId, newSessionName);
+          console.log(`[spawnSessionForTopic] Proactive resume ID save: ${resumeId} for topic ${topicId}`);
         }
       } catch (err) {
-        console.error(`[spawnSessionForTopic] Proactive UUID save failed:`, err);
+        console.error(`[spawnSessionForTopic] Proactive resume ID save failed:`, err);
       }
     }, 8000);
   }
@@ -553,16 +569,18 @@ async function respawnSessionForTopic(
 ): Promise<void> {
   console.log(`[telegram→session] Session "${targetSession}" needs respawn for topic ${topicId}`);
 
-  // Save the old session's Claude UUID before respawning so --resume can reattach context
+  // Save the old session's runtime session ID before respawning so --resume can reattach context
   if (_topicResumeMap) {
     try {
-      const uuid = _topicResumeMap.findUuidForSession(targetSession);
-      if (uuid) {
-        _topicResumeMap.save(topicId, uuid, targetSession);
-        console.log(`[telegram→session] Saved resume UUID ${uuid} for topic ${topicId}`);
+      const sessions = sessionManager.listRunningSessions();
+      const session = sessions.find(s => s.tmuxSession === targetSession);
+      const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+      if (resumeId) {
+        _topicResumeMap.save(topicId, resumeId, targetSession);
+        console.log(`[telegram→session] Saved resume session ID ${resumeId} for topic ${topicId}`);
       }
     } catch (err) {
-      console.error(`[telegram→session] Failed to save resume UUID:`, err);
+      console.error(`[telegram→session] Failed to save resume session ID:`, err);
     }
   }
 
@@ -596,7 +614,10 @@ function wireTelegramCallbacks(
   state: StateManager,
   quotaTracker?: QuotaTracker,
   accountSwitcher?: AccountSwitcher,
-  claudePath?: string,
+  agentName?: string,
+  runtime?: AgentRuntimeKind,
+  runtimePath?: string,
+  runtimeHome?: string,
   topicMemory?: TopicMemory,
 ): void {
   // /interrupt — send Escape key to a tmux session
@@ -614,12 +635,14 @@ function wireTelegramCallbacks(
 
   // /restart — kill session and respawn
   telegram.onRestartSession = async (sessionName: string, topicId: number): Promise<void> => {
-    // Save resume UUID before killing so the new session can --resume
+    // Save resume session ID before killing so the new session can --resume
     if (_topicResumeMap) {
       try {
-        const uuid = _topicResumeMap.findUuidForSession(sessionName);
-        if (uuid) {
-          _topicResumeMap.save(topicId, uuid, sessionName);
+        const sessions = sessionManager.listRunningSessions();
+        const session = sessions.find(s => s.tmuxSession === sessionName);
+        const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+        if (resumeId) {
+          _topicResumeMap.save(topicId, resumeId, sessionName);
         }
       } catch { /* best effort */ }
     }
@@ -746,7 +769,12 @@ function wireTelegramCallbacks(
       return;
     }
 
-    const loginSession = 'instar-login-flow';
+    const loginSession = `instar-login-${(agentName || 'agent')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 32)}`;
 
     try {
       // Kill any existing login session
@@ -755,19 +783,28 @@ function wireTelegramCallbacks(
       } catch { /* @silent-fallback-ok — kill login session, may be dead */ }
 
       // Start login command in tmux
-      const cliPath = claudePath || 'claude';
-      const loginCmd = email
-        ? `${cliPath} auth login --email "${email}"`
-        : `${cliPath} auth login`;
+      const cliPath = runtimePath || (runtime === 'codex' ? 'codex' : 'claude');
+      const tmuxArgs = ['new-session', '-d', '-s', loginSession];
+      if (runtime === 'codex' && runtimeHome) {
+        tmuxArgs.push('-e', `CODEX_HOME=${runtimeHome}`);
+      }
+      tmuxArgs.push(cliPath);
+      if (runtime === 'codex') {
+        tmuxArgs.push('login', '--device-auth');
+      } else {
+        tmuxArgs.push('auth', 'login');
+        if (email) {
+          tmuxArgs.push('--email', email);
+        }
+      }
 
-      execFileSync(tmuxPath, ['new-session', '-d', '-s', loginSession, loginCmd], {
-        timeout: 10000,
-      });
+      execFileSync(tmuxPath, tmuxArgs, { timeout: 10000 });
 
       await telegram.sendToTopic(replyTopicId, `Login flow started${email ? ` for ${email}` : ''}. Watching for OAuth URL...`);
 
       // Poll for OAuth URL (up to 15 seconds)
       let oauthUrl: string | null = null;
+      let deviceCode: string | null = null;
       for (let i = 0; i < 30; i++) {
         await new Promise(r => setTimeout(r, 500));
         try {
@@ -775,7 +812,12 @@ function wireTelegramCallbacks(
           const urlMatch = output.match(/https:\/\/[^\s]+auth[^\s]*/i)
             || output.match(/https:\/\/[^\s]+login[^\s]*/i)
             || output.match(/https:\/\/[^\s]+oauth[^\s]*/i)
+            || output.match(/https:\/\/[^\s]+device[^\s]*/i)
             || output.match(/https:\/\/console\.anthropic\.com[^\s]*/i);
+          const codeMatch = output.match(/\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b/);
+          if (codeMatch) {
+            deviceCode = codeMatch[0];
+          }
           if (urlMatch) {
             oauthUrl = urlMatch[0];
             break;
@@ -788,7 +830,10 @@ function wireTelegramCallbacks(
         return;
       }
 
-      await telegram.sendToTopic(replyTopicId, `Open this URL to authenticate:\n\n${oauthUrl}\n\nI'll detect when you're done.`);
+      await telegram.sendToTopic(
+        replyTopicId,
+        `Open this URL to authenticate:\n\n${oauthUrl}${deviceCode ? `\n\nCode: ${deviceCode}` : ''}\n\nI'll detect when you're done.`,
+      );
 
       // Poll for auth completion (up to 5 minutes)
       let authComplete = false;
@@ -1706,15 +1751,16 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green(`  Input Guard: enabled (action: ${guardConfig.action ?? 'warn'})`));
     }
 
-    // TopicResumeMap: persist Claude session UUIDs across session restarts.
-    // When a session is killed/restarted, we save its UUID so the next spawn
-    // can use --resume to reattach to the existing conversation context.
     const { TopicResumeMap } = await import('../core/TopicResumeMap.js');
-    _topicResumeMap = new TopicResumeMap(config.stateDir, config.sessions.projectDir, config.sessions.tmuxPath);
+    _topicResumeMap = new TopicResumeMap(config.stateDir, config.sessions.projectDir, {
+      runtime: config.sessions.runtime,
+      tmuxPath: config.sessions.tmuxPath,
+      runtimeHome: config.sessions.runtimeHome,
+    });
     _projectDir = config.sessions.projectDir;
 
     // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Prefer Anthropic API (faster, no tmux) → Claude CLI fallback.
+    // Prefer Anthropic API (faster, no tmux) → configured runtime fallback.
     // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
     let sharedIntelligence: IntelligenceProvider | undefined;
     try {
@@ -1725,7 +1771,10 @@ export async function startServer(options: StartOptions): Promise<void> {
     } catch { /* no API key available */ }
     if (!sharedIntelligence) {
       try {
-        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        const runtimeProvider = createRuntimeIntelligenceProvider(config.sessions);
+        if (runtimeProvider) {
+          sharedIntelligence = runtimeProvider;
+        }
       } catch { /* CLI not available */ }
     }
 
@@ -1739,8 +1788,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     let relationships: RelationshipManager | undefined;
     if (config.relationships) {
       // Wire LLM intelligence for identity resolution.
-      // Priority: Claude CLI (subscription, zero extra cost) > Anthropic API (explicit opt-in only)
-      const claudePath = config.sessions.claudePath;
+      // Priority: configured runtime (zero extra cost) > Anthropic API when explicitly requested.
       let intelligenceMode = 'heuristic-only';
 
       // Check if user explicitly opted into API-based intelligence
@@ -1756,10 +1804,12 @@ export async function startServer(options: StartOptions): Promise<void> {
         } else {
           console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found'));
         }
-      } else if (claudePath) {
-        // Default: use Claude CLI via subscription (zero extra cost)
-        config.relationships.intelligence = new ClaudeCliIntelligenceProvider(claudePath);
-        intelligenceMode = 'LLM-supervised (Claude CLI subscription)';
+      } else {
+        const runtimeProvider = createRuntimeIntelligenceProvider(config.sessions);
+        if (runtimeProvider) {
+          config.relationships.intelligence = runtimeProvider;
+          intelligenceMode = `LLM-supervised (${describeRuntimeIntelligence(config.sessions)})`;
+        }
       }
 
       relationships = new RelationshipManager(config.relationships);
@@ -2096,7 +2146,18 @@ export async function startServer(options: StartOptions): Promise<void> {
       // Wire up topic → session routing and session management callbacks
       wireTelegramRouting(telegram, sessionManager, quotaTracker, topicMemory, userManager,
         (topicId, text) => handleFixCommand(topicId, text, _fixDeps!));
-      wireTelegramCallbacks(telegram, sessionManager, state, quotaTracker, accountSwitcher, config.sessions.claudePath, topicMemory);
+      wireTelegramCallbacks(
+        telegram,
+        sessionManager,
+        state,
+        quotaTracker,
+        accountSwitcher,
+        config.projectName,
+        config.sessions.runtime,
+        config.sessions.runtimePath,
+        config.sessions.runtimeHome,
+        topicMemory,
+      );
 
       // Wire up unknown-user handling (Multi-User Setup Wizard Phase 4.5)
       telegram.onGetRegistrationPolicy = () => ({
@@ -2438,20 +2499,20 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     sessionManager.startMonitoring();
 
-    // Proactive resume heartbeat: every 60s, update the topic→UUID mapping
+    // Proactive resume heartbeat: every 60s, update the topic→session-ID mapping
     // for all active topic-linked sessions. Ensures crash recovery via --resume.
     if (_topicResumeMap && telegram) {
       const resumeHeartbeatInterval = setInterval(() => {
         try {
           const topicSessions = telegram!.getAllTopicSessions();
-          // Enrich with authoritative Claude session IDs from SessionManager
-          const enriched = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+          const enriched = new Map<number, { sessionName: string; claudeSessionId?: string; runtimeSessionId?: string }>();
           for (const [topicId, sessionName] of topicSessions) {
             const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
             enriched.set(topicId, {
               sessionName,
               claudeSessionId: session?.claudeSessionId ?? undefined,
+              runtimeSessionId: session?.runtimeSessionId ?? undefined,
             });
           }
           _topicResumeMap?.refreshResumeMappings(enriched);
@@ -2464,22 +2525,20 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Resume heartbeat: active (60s interval)'));
     }
 
-    // Save Claude session UUID before any session kill so the topic can be
-    // resumed later with --resume. This fires BEFORE the tmux session is
-    // destroyed, so the UUID can still be discovered from the JSONL mtime.
+    // Save the runtime session ID before any session kill so the topic can be
+    // resumed later with --resume.
     if (_topicResumeMap && telegram) {
       sessionManager.on('beforeSessionKill', (session: import('../core/types.js').Session) => {
         try {
           const topicId = telegram!.getTopicForSession(session.tmuxSession);
           if (!topicId) return;
-          // Use authoritative claudeSessionId from hook events, fall back to mtime heuristic
-          const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
-          if (uuid) {
-            _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
-            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+          const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+          if (resumeId) {
+            _topicResumeMap!.save(topicId, resumeId, session.tmuxSession);
+            console.log(`[beforeSessionKill] Saved resume session ID ${resumeId} for topic ${topicId} (session: ${session.name})`);
           }
         } catch (err) {
-          console.error(`[beforeSessionKill] Failed to save resume UUID:`, err);
+          console.error(`[beforeSessionKill] Failed to save resume session ID:`, err);
         }
       });
 
@@ -2537,11 +2596,9 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Auto-summarize topics on session completion.
     // When a Telegram-linked session ends, check if its topic needs a summary update.
     // Uses Haiku for cost efficiency — summaries don't need deep reasoning.
-    if (topicMemory && telegram) {
+    if (topicMemory && telegram && sharedIntelligence) {
       const { TopicSummarizer } = await import('../memory/TopicSummarizer.js');
-      const { ClaudeCliIntelligenceProvider } = await import('../core/ClaudeCliIntelligenceProvider.js');
-      const summaryIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
-      const summarizer = new TopicSummarizer(summaryIntelligence, topicMemory);
+      const summarizer = new TopicSummarizer(sharedIntelligence, topicMemory);
 
       sessionManager.on('sessionComplete', (session) => {
         // Find the topic linked to this session
@@ -2688,7 +2745,8 @@ export async function startServer(options: StartOptions): Promise<void> {
           clearStallForTopic: (topicId) => telegram!.clearStallTracking(topicId),
           spawnTriageSession: (name, options) => sessionManager.spawnTriageSession(name, options),
           getTriageSessionUuid: (sessionName) => {
-            return _topicResumeMap?.findUuidForSession(sessionName) ?? undefined;
+            const session = sessionManager.listRunningSessions().find(s => s.tmuxSession === sessionName);
+            return getKnownRuntimeSessionId(session) ?? undefined;
           },
           killTriageSession: (name) => {
             try {
@@ -3388,42 +3446,40 @@ export async function startServer(options: StartOptions): Promise<void> {
         return null; // Normal messages pass through
       };
       telegram.onSentinelKillSession = (sessionName: string) => {
-        // Save resume UUID before killing so respawn can --resume
+        // Save resume session ID before killing so respawn can --resume
         if (_topicResumeMap) {
           try {
             const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
-            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
-            if (uuid) {
-              const topicSessions = telegram.getAllTopicSessions();
-              for (const [topicId, sessName] of topicSessions) {
-                if (sessName === sessionName) {
-                  _topicResumeMap.save(topicId, uuid, sessionName);
-                  console.log(`[sentinel] Saved resume UUID ${uuid} for topic ${topicId} before kill`);
-                  break;
-                }
+            const topicSessions = telegram.getAllTopicSessions();
+            for (const [topicId, sessName] of topicSessions) {
+              if (sessName !== sessionName) continue;
+              const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+              if (resumeId) {
+                _topicResumeMap.save(topicId, resumeId, sessionName);
+                console.log(`[sentinel] Saved resume session ID ${resumeId} for topic ${topicId} before kill`);
               }
+              break;
             }
           } catch { /* best effort */ }
         }
         return sessionManager.killSession(sessionName);
       };
       telegram.onSentinelPauseSession = (sessionName: string) => {
-        // Save resume UUID so if the session dies during pause, respawn can --resume
+        // Save resume session ID so if the session dies during pause, respawn can --resume
         if (_topicResumeMap) {
           try {
             const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
-            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
-            if (uuid) {
-              const topicSessions = telegram.getAllTopicSessions();
-              for (const [topicId, sessName] of topicSessions) {
-                if (sessName === sessionName) {
-                  _topicResumeMap.save(topicId, uuid, sessionName);
-                  console.log(`[sentinel] Saved resume UUID ${uuid} for topic ${topicId} on pause`);
-                  break;
-                }
+            const topicSessions = telegram.getAllTopicSessions();
+            for (const [topicId, sessName] of topicSessions) {
+              if (sessName !== sessionName) continue;
+              const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+              if (resumeId) {
+                _topicResumeMap.save(topicId, resumeId, sessionName);
+                console.log(`[sentinel] Saved resume session ID ${resumeId} for topic ${topicId} on pause`);
               }
+              break;
             }
           } catch { /* best effort */ }
         }
@@ -4048,7 +4104,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     const shutdown = async () => {
       console.log('\nShutting down...');
 
-      // Save resume UUIDs for ALL active topic-linked sessions before exit.
+      // Save resume session IDs for ALL active topic-linked sessions before exit.
       // Without this, server restarts lose all resume mappings because:
       // 1. Resume entries are consumed (removed) on spawn
       // 2. Proactive save may not have run yet
@@ -4061,18 +4117,18 @@ export async function startServer(options: StartOptions): Promise<void> {
             let saved = 0;
             for (const [topicId, sessionName] of topicSessions) {
               const session = runningSessions.find(s => s.tmuxSession === sessionName);
-              const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
-              if (uuid) {
-                _topicResumeMap.save(topicId, uuid, sessionName);
+              const resumeId = getStrictResumeSessionIdForTopic(topicId, session);
+              if (resumeId) {
+                _topicResumeMap.save(topicId, resumeId, sessionName);
                 saved++;
               }
             }
             if (saved > 0) {
-              console.log(`[shutdown] Saved ${saved} resume UUID(s) for active sessions`);
+              console.log(`[shutdown] Saved ${saved} resume session ID(s) for active sessions`);
             }
           }
         } catch (err) {
-          console.error('[shutdown] Failed to save resume UUIDs:', err);
+          console.error('[shutdown] Failed to save resume session IDs:', err);
         }
       }
 
