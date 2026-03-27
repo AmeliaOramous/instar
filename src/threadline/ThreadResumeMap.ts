@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { claudeProjectJsonlDir } from '../core/ClaudeProjectPaths.js';
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -232,8 +233,7 @@ export class ThreadResumeMap {
     try {
       if (!threadSessions || threadSessions.size === 0) return;
 
-      const projectHash = this.projectDir.replace(/\//g, '-');
-      const projectJsonlDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
+      const projectJsonlDir = claudeProjectJsonlDir(this.projectDir, os.homedir());
 
       if (!fs.existsSync(projectJsonlDir)) return;
 

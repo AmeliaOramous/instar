@@ -14,14 +14,28 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { TopicResumeMap } from '../../src/core/TopicResumeMap.js';
 import { EventEmitter } from 'node:events';
+import { claudeProjectDirName } from '../../src/core/ClaudeProjectPaths.js';
+
+const { mockSpawnSync } = vi.hoisted(() => ({
+  mockSpawnSync: vi.fn(),
+}));
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawnSync: mockSpawnSync,
+  };
+});
+
+import { TopicResumeMap } from '../../src/core/TopicResumeMap.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
 /** Compute the expected Claude project dir hash (must match TopicResumeMap internals) */
 function claudeProjectHash(projectDir: string): string {
-  return projectDir.replace(/[\/\.]/g, '-');
+  return claudeProjectDirName(projectDir);
 }
 
 /** Create a fake JSONL file in the project-hashed Claude directory */
@@ -62,6 +76,8 @@ describe('Session Resume E2E', () => {
 
     resumeMap = new TopicResumeMap(stateDir, projectDir);
     cleanupDirs = [];
+    mockSpawnSync.mockReset();
+    mockSpawnSync.mockReturnValue({ status: 0 });
   });
 
   afterEach(() => {
@@ -149,22 +165,12 @@ describe('Session Resume E2E', () => {
   // ── Heartbeat (refreshResumeMappings) ───────────────────────────
 
   describe('refreshResumeMappings heartbeat', () => {
-    // Mock child_process for tmux has-session checks
-    const originalSpawnSync = vi.hoisted(() => {
-      return null as any;
-    });
-
     it('discovers UUIDs for active topic sessions', () => {
       const uuid = '55555555-5555-5555-5555-555555555555';
       const myDir = createFakeJsonl(projectDir, uuid);
       cleanupDirs.push(myDir);
 
-      // Create a TopicResumeMap with a mock tmux path that always says sessions exist
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
       topicSessions.set(42, { sessionName: 'echo-my-topic' });
@@ -180,12 +186,8 @@ describe('Session Resume E2E', () => {
       const myDir = createFakeJsonl(projectDir, uuid);
       cleanupDirs.push(myDir);
 
-      // Mock tmux that says session doesn't exist
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux-dead.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 1\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      mockSpawnSync.mockReturnValue({ status: 1 });
+      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
       topicSessions.set(42, { sessionName: 'echo-dead-session' });
@@ -215,12 +217,7 @@ describe('Session Resume E2E', () => {
       data['42'].savedAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
       fs.writeFileSync(mapPath, JSON.stringify(data));
 
-      // Mock tmux that says session exists
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux-alive.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const heartbeatMap = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
       topicSessions.set(42, { sessionName: 'echo-my-topic' });
@@ -374,11 +371,7 @@ describe('Session Resume E2E', () => {
       cleanupDirs.push(myDir);
 
       // Phase 1: Session is running, heartbeat saves UUID
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const map = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
       topicSessions.set(topicId, { sessionName: 'echo-dashboard-features' });
 
@@ -551,11 +544,7 @@ describe('Session Resume E2E', () => {
       createFakeJsonl(projectDir, manualUuid);
       cleanupDirs.push(myDir);
 
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const map = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       // Manual save for topic 10
       map.save(10, manualUuid, 'echo-manual');
@@ -593,11 +582,7 @@ describe('Session Resume E2E', () => {
       fs.utimesSync(path.join(myDir, `${uuid2}.jsonl`), new Date(Date.now() + 20000), new Date(Date.now() + 20000));
       fs.utimesSync(path.join(myDir, `${uuid3}.jsonl`), new Date(Date.now() + 10000), new Date(Date.now() + 10000));
 
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const map = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       // Two topics with no claudeSessionId — the heartbeat should NOT guess
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
@@ -619,11 +604,7 @@ describe('Session Resume E2E', () => {
       createFakeJsonl(projectDir, uuid2);
       cleanupDirs.push(myDir);
 
-      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
-      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
-      fs.chmodSync(mockTmuxScript, '755');
-
-      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+      const map = new TopicResumeMap(stateDir, projectDir, 'mock-tmux');
 
       // Two topics WITH authoritative claudeSessionId from hooks
       const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();

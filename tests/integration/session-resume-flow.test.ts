@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { TopicResumeMap } from '../../src/core/TopicResumeMap.js';
+import { claudeProjectDirName } from '../../src/core/ClaudeProjectPaths.js';
 
 // Track spawned session args
 const spawnedSessions: Array<{
@@ -86,6 +87,8 @@ describe('Session Resume Flow (integration)', () => {
 
     const config: SessionManagerConfig = {
       tmuxPath: '/usr/bin/tmux',
+      runtime: 'claude',
+      runtimePath: '/usr/local/bin/claude',
       claudePath: '/usr/local/bin/claude',
       projectDir: tmpDir,
       maxSessions: 3,
@@ -98,7 +101,7 @@ describe('Session Resume Flow (integration)', () => {
     // Create a fake JSONL file in the project-hashed directory for UUID validation.
     // Must match TopicResumeMap.claudeProjectDirName() which replaces '/' and '.' with '-'.
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
-    const projectHash = projectDir.replace(/[\/\.]/g, '-');
+    const projectHash = claudeProjectDirName(projectDir);
     testProjectDir = path.join(projectsDir, projectHash);
     fs.mkdirSync(testProjectDir, { recursive: true });
 

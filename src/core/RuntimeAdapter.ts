@@ -6,6 +6,10 @@ export interface RuntimeCommand {
   env: Record<string, string>;
 }
 
+function runtimeBinary(config: SessionManagerConfig): string {
+  return config.runtimePath || config.claudePath || 'claude';
+}
+
 function modelFlag(runtime: AgentRuntimeKind, model?: ModelTier): string[] {
   if (!model) return [];
 
@@ -34,7 +38,7 @@ export function buildBatchRuntimeCommand(
 ): RuntimeCommand {
   if (config.runtime === 'codex') {
     return {
-      binary: config.runtimePath,
+      binary: runtimeBinary(config),
       args: [
         'exec',
         '--ask-for-approval', 'never',
@@ -48,7 +52,7 @@ export function buildBatchRuntimeCommand(
   }
 
   return {
-    binary: config.runtimePath,
+    binary: runtimeBinary(config),
     args: [
       '--dangerously-skip-permissions',
       ...modelFlag(config.runtime, options.model),
@@ -73,7 +77,7 @@ export function buildInteractiveRuntimeCommand(
     );
 
     return {
-      binary: config.runtimePath,
+      binary: runtimeBinary(config),
       args,
       env: runtimeEnv(config),
     };
@@ -85,7 +89,7 @@ export function buildInteractiveRuntimeCommand(
   }
 
   return {
-    binary: config.runtimePath,
+    binary: runtimeBinary(config),
     args,
     env: runtimeEnv(config),
   };
@@ -105,7 +109,7 @@ export function buildTriageRuntimeCommand(
     );
 
     return {
-      binary: config.runtimePath,
+      binary: runtimeBinary(config),
       args,
       env: runtimeEnv(config),
     };
@@ -121,7 +125,7 @@ export function buildTriageRuntimeCommand(
   }
 
   return {
-    binary: config.runtimePath,
+    binary: runtimeBinary(config),
     args,
     env: runtimeEnv(config),
   };

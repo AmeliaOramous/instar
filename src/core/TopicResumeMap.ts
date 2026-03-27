@@ -15,6 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import type { AgentRuntimeKind } from './types.js';
+import { claudeProjectDirName, claudeProjectJsonlDir } from './ClaudeProjectPaths.js';
 
 interface ResumeEntry {
   sessionId: string;
@@ -47,13 +48,19 @@ export class TopicResumeMap {
   constructor(
     stateDir: string,
     projectDir: string,
-    options: { runtime: AgentRuntimeKind; tmuxPath?: string; runtimeHome?: string },
+    options?: { runtime: AgentRuntimeKind; tmuxPath?: string; runtimeHome?: string } | string,
   ) {
     this.filePath = path.join(stateDir, 'topic-resume-map.json');
     this.projectDir = projectDir;
-    this.tmuxPath = options.tmuxPath || 'tmux';
-    this.runtime = options.runtime;
-    this.runtimeHome = options.runtimeHome;
+    if (typeof options === 'string') {
+      this.tmuxPath = options || 'tmux';
+      this.runtime = 'claude';
+      this.runtimeHome = undefined;
+    } else {
+      this.tmuxPath = options?.tmuxPath || 'tmux';
+      this.runtime = options?.runtime || 'claude';
+      this.runtimeHome = options?.runtimeHome;
+    }
   }
 
   /**
@@ -62,14 +69,14 @@ export class TopicResumeMap {
    * stripping dots — e.g. /Users/foo/.bar/baz → -Users-foo--bar-baz
    */
   private claudeProjectDirName(): string {
-    return this.projectDir.replace(/[\/\.]/g, '-');
+    return claudeProjectDirName(this.projectDir);
   }
 
   /**
    * Get the full path to this project's Claude JSONL directory.
    */
   private claudeProjectJsonlDir(): string {
-    return path.join(os.homedir(), '.claude', 'projects', this.claudeProjectDirName());
+    return claudeProjectJsonlDir(this.projectDir, os.homedir());
   }
 
   private codexHome(): string {

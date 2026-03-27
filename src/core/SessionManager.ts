@@ -120,7 +120,12 @@ export class SessionManager extends EventEmitter {
 
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
-    this.config = config;
+    this.config = {
+      ...config,
+      runtime: config.runtime || 'claude',
+      runtimePath: config.runtimePath || config.claudePath || 'claude',
+      claudePath: config.claudePath || config.runtimePath || 'claude',
+    };
     this.state = state;
   }
 
@@ -1707,6 +1712,15 @@ export class SessionManager extends EventEmitter {
     const finalOutput = this.captureOutput(tmuxSession, 20);
     console.error(`[SessionManager] Runtime not ready in "${tmuxSession}" after ${timeoutMs}ms. Output: ${(finalOutput || '').slice(-200)}`);
     return false;
+  }
+
+  /**
+   * Back-compat shim for tests and older call sites that still refer to the
+   * Claude-specific readiness helper. Claude readiness historically used '❯'
+   * as the definitive prompt marker.
+   */
+  private async waitForClaudeReady(tmuxSession: string, timeoutMs: number = 30000): Promise<boolean> {
+    return this.waitForRuntimeReady(tmuxSession, timeoutMs);
   }
 
   tmuxSessionExists(name: string): boolean {

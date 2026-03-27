@@ -16,6 +16,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { TopicResumeMap } from '../../src/core/TopicResumeMap.js';
+import { claudeProjectDirName } from '../../src/core/ClaudeProjectPaths.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -42,7 +43,7 @@ beforeEach(() => {
   fs.mkdirSync(projectDir, { recursive: true });
 
   // Create the Claude projects directory for JSONL files
-  const projectHash = projectDir.replace(/\//g, '-');
+  const projectHash = claudeProjectDirName(projectDir);
   projectJsonlDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
   fs.mkdirSync(projectJsonlDir, { recursive: true });
 

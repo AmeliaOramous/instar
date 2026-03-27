@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import type { IntelligenceProvider } from './types.js';
+import { claudeProjectJsonlDir } from './ClaudeProjectPaths.js';
 
 export interface TopicHistoryProvider {
   searchLog(opts: { topicId: number; limit: number }): Array<{ text: string; fromJustin?: boolean; fromUser?: boolean }>;
@@ -105,10 +106,8 @@ export async function llmValidateResumeCoherence(
     if (deps.readSessionJsonl) {
       sessionContext = deps.readSessionJsonl(resumeUuid);
     } else {
-      const projectHash = projectDir.replace(/\//g, '-');
       const jsonlPath = path.join(
-        os.homedir(),
-        '.claude', 'projects', projectHash,
+        claudeProjectJsonlDir(projectDir, os.homedir()),
         `${resumeUuid}.jsonl`
       );
 

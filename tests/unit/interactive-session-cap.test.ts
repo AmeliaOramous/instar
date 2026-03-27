@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 describe('SessionManager — interactive session cap', () => {
+  const runtimeAdapterPath = path.join(process.cwd(), 'src/core/RuntimeAdapter.ts');
+
   it('spawnInteractiveSession checks maxSessions', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
@@ -26,7 +28,13 @@ describe('SessionManager — interactive session cap', () => {
     expect(method).toContain('listRunningSessions');
   });
 
-  it('spawnInteractiveSession includes --dangerously-skip-permissions', () => {
+  it('Claude interactive runtime includes --dangerously-skip-permissions', () => {
+    const runtimeAdapter = fs.readFileSync(runtimeAdapterPath, 'utf-8');
+    expect(runtimeAdapter).toContain('buildInteractiveRuntimeCommand');
+    expect(runtimeAdapter).toContain('--dangerously-skip-permissions');
+  });
+
+  it('spawnInteractiveSession delegates command construction to the runtime adapter', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
       'utf-8',
@@ -37,8 +45,7 @@ describe('SessionManager — interactive session cap', () => {
     const methodEnd = source.indexOf('\n  /**', methodStart + 1);
     const method = source.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
 
-    // Must include --dangerously-skip-permissions
-    expect(method).toContain('--dangerously-skip-permissions');
+    expect(method).toContain('buildInteractiveRuntimeCommand');
   });
 
   it('spawnInteractiveSession does NOT use bash -c (shell injection risk)', () => {
@@ -57,7 +64,13 @@ describe('SessionManager — interactive session cap', () => {
     expect(method).not.toContain('"bash", "-c"');
   });
 
-  it('spawnSession includes --dangerously-skip-permissions', () => {
+  it('Claude batch runtime includes --dangerously-skip-permissions', () => {
+    const runtimeAdapter = fs.readFileSync(runtimeAdapterPath, 'utf-8');
+    expect(runtimeAdapter).toContain('buildBatchRuntimeCommand');
+    expect(runtimeAdapter).toContain('--dangerously-skip-permissions');
+  });
+
+  it('spawnSession delegates command construction to the runtime adapter', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
       'utf-8',
@@ -68,8 +81,7 @@ describe('SessionManager — interactive session cap', () => {
     const methodEnd = source.indexOf('\n  /**', methodStart + 1);
     const method = source.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
 
-    // Must include --dangerously-skip-permissions
-    expect(method).toContain('--dangerously-skip-permissions');
+    expect(method).toContain('buildBatchRuntimeCommand');
   });
 
   it('waitForClaudeReady has .catch() handler', () => {

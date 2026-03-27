@@ -1416,7 +1416,7 @@ describe('Threadline Integration Tests', () => {
 
       // ThreadResumeMap.get() checks for JSONL file existence, so we need
       // to create a fake one under ~/.claude/projects/ for the UUID.
-      const projectHash = projectDir.replace(/\//g, '-');
+      const projectHash = projectDir.replace(/[\\/.:]/g, '-');
       const claudeProjectDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
       fs.mkdirSync(claudeProjectDir, { recursive: true });
       const jsonlPath = path.join(claudeProjectDir, `${originalUuid}.jsonl`);
@@ -1873,7 +1873,7 @@ describe('Threadline Integration Tests', () => {
 
       // ThreadlineRouter.onThreadFailed calls threadResumeMap.get() which
       // checks JSONL existence. Create a fake JSONL file for the UUID.
-      const projectHash = projectDir.replace(/\//g, '-');
+      const projectHash = projectDir.replace(/[\\/.:]/g, '-');
       const claudeProjectDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
       fs.mkdirSync(claudeProjectDir, { recursive: true });
       const jsonlPath = path.join(claudeProjectDir, `${entryUuid}.jsonl`);

@@ -9,6 +9,7 @@ import path from 'node:path';
 
 describe('Session reaping and detection', () => {
   const SOURCE_PATH = path.join(process.cwd(), 'src/core/SessionManager.ts');
+  const RUNTIME_ADAPTER_PATH = path.join(process.cwd(), 'src/core/RuntimeAdapter.ts');
   let source: string;
 
   it('source file exists', () => {
@@ -137,17 +138,17 @@ describe('Session reaping and detection', () => {
       expect(source).toContain('already exists');
     });
 
-    it('passes prompt as CLI argument and unsets CLAUDECODE env var', () => {
+    it('builds the runtime command through the adapter and unsets CLAUDECODE env var', () => {
       source = fs.readFileSync(SOURCE_PATH, 'utf-8');
+      const runtimeAdapterSource = fs.readFileSync(RUNTIME_ADAPTER_PATH, 'utf-8');
       // spawnSession uses tmux -e flag to unset CLAUDECODE env var directly
       // (prevents "cannot be launched inside another Claude Code session" errors)
       const spawnSection = source.match(/async spawnSession[\s\S]*?this\.state\.saveSession\(session\)/);
       expect(spawnSection).toBeTruthy();
       const body = spawnSection![0];
-      // Should pass prompt as -p argument
-      expect(body).toContain("'-p'");
-      // Should use this.config.claudePath
-      expect(body).toContain('this.config.claudePath');
+      expect(body).toContain('buildBatchRuntimeCommand');
+      expect(runtimeAdapterSource).toContain("'-p'");
+      expect(runtimeAdapterSource).toContain('config.claudePath');
       // Should unset CLAUDECODE to prevent nested Claude Code errors
       // Uses tmux -e flag: '-e', 'CLAUDECODE=' sets env var to empty (unset) in spawned session
       expect(body).toContain("'CLAUDECODE='");

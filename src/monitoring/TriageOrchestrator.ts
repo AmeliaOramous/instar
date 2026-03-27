@@ -14,6 +14,7 @@
 
 import { EventEmitter } from 'events';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import type { StateManager } from '../core/StateManager.js';
 import type {
@@ -21,6 +22,7 @@ import type {
   ProcessInfo,
   TreatmentAction,
 } from './StallTriageNurse.types.js';
+import { claudeProjectJsonlDir } from '../core/ClaudeProjectPaths.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -487,10 +489,9 @@ export class TriageOrchestrator extends EventEmitter {
     let jsonlMtime: number | null = null;
     let jsonlSize: number | null = null;
     try {
-      const projectHash = this.deps.projectDir.replace(/\//g, '-');
-      const jsonlDir = path.join(
-        process.env.HOME || '/tmp',
-        '.claude', 'projects', projectHash,
+      const jsonlDir = claudeProjectJsonlDir(
+        this.deps.projectDir,
+        process.env.HOME || os.homedir() || '/tmp',
       );
       if (fs.existsSync(jsonlDir)) {
         const jsonlFiles = fs.readdirSync(jsonlDir).filter(f => f.endsWith('.jsonl'));

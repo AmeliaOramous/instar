@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { TopicResumeMap } from '../../src/core/TopicResumeMap.js';
+import { claudeProjectDirName } from '../../src/core/ClaudeProjectPaths.js';
 
 describe('TopicResumeMap', () => {
   let tmpDir: string;
@@ -239,11 +240,11 @@ describe('TopicResumeMap', () => {
   // ── findUuidForSession() ────────────────────────────────────────
 
   describe('findUuidForSession()', () => {
-    it('delegates to findClaudeSessionUuid', () => {
+    it('returns the explicit runtime session id when the session record exists', () => {
       const uuid = '550e8400-e29b-41d4-a716-446655440000';
       setupFakeClaudeProject(uuid);
 
-      const result = resumeMap.findUuidForSession('any-tmux-session');
+      const result = resumeMap.findUuidForSession('any-tmux-session', uuid);
       expect(result).toBe(uuid);
     });
   });
@@ -269,7 +270,7 @@ describe('TopicResumeMap', () => {
   function setupFakeClaudeProject(uuid: string): void {
     const projectsDir = path.join(os.homedir(), '.claude', 'projects');
     // Must match the hashing in TopicResumeMap.claudeProjectDirName()
-    const projectHash = projectDir.replace(/[\/\.]/g, '-');
+    const projectHash = claudeProjectDirName(projectDir);
     const testProjectDir = path.join(projectsDir, projectHash);
     fs.mkdirSync(testProjectDir, { recursive: true });
     fs.writeFileSync(path.join(testProjectDir, `${uuid}.jsonl`), '');

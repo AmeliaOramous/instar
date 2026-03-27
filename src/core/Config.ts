@@ -298,12 +298,14 @@ export function loadConfig(projectDir?: string): InstarConfig {
 
   const projectName = fileConfig.projectName || path.basename(resolvedProjectDir);
 
+  const rawSessionConfig = fileConfig.sessions as (Partial<SessionManagerConfig> & Record<string, unknown>) | undefined;
+
   const sessions: SessionManagerConfig = {
     tmuxPath,
     runtime,
     runtimePath,
-    runtimeHome: typeof (fileConfig.sessions as Record<string, unknown> | undefined)?.runtimeHome === 'string'
-      ? ((fileConfig.sessions as Record<string, unknown>).runtimeHome as string)
+    runtimeHome: typeof rawSessionConfig?.runtimeHome === 'string'
+      ? rawSessionConfig.runtimeHome
       : undefined,
     claudePath: runtime === 'claude' ? runtimePath : undefined,
     projectDir: resolvedProjectDir,

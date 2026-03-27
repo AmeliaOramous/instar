@@ -27,6 +27,7 @@ import { execFileSync } from 'node:child_process';
 import { detectToolCallStall, type StallInfo } from './stall-detector.js';
 import { detectCrashedSession, detectErrorLoop, type CrashInfo, type ErrorLoopInfo } from './crash-detector.js';
 import { truncateJsonlToSafePoint, type TruncationStrategy } from './jsonl-truncator.js';
+import { claudeProjectJsonlDir } from '../core/ClaudeProjectPaths.js';
 
 // ============================================================================
 // Types
@@ -495,8 +496,7 @@ export class SessionRecovery extends EventEmitter {
    */
   private findJsonlForSession(sessionName: string): string | null {
     const projectDir = this.config.projectDir;
-    const projectHash = projectDir.replace(/[\/\.]/g, '-');
-    const projectJsonlDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
+    const projectJsonlDir = claudeProjectJsonlDir(projectDir, os.homedir());
 
     if (!fs.existsSync(projectJsonlDir)) return null;
 
@@ -553,8 +553,7 @@ export class SessionRecovery extends EventEmitter {
    */
   private cleanupBackupFiles(maxAgeMs: number = 24 * 60 * 60 * 1000): void {
     const projectDir = this.config.projectDir;
-    const projectHash = projectDir.replace(/[\/\.]/g, '-');
-    const projectJsonlDir = path.join(os.homedir(), '.claude', 'projects', projectHash);
+    const projectJsonlDir = claudeProjectJsonlDir(projectDir, os.homedir());
 
     if (!fs.existsSync(projectJsonlDir)) return;
 
