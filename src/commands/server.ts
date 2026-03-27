@@ -3115,14 +3115,16 @@ export async function startServer(options: StartOptions): Promise<void> {
         console.warn('[SleepWake] tmux check failed after wake');
       }
 
-      // Restart tunnel if configured — use forceStop to handle zombie cloudflared
-      // processes that may be hung after sleep. Race with a 15s overall timeout
-      // to prevent the wake handler itself from blocking indefinitely.
+      // Restart tunnel if configured — disable auto-reconnect first to prevent
+      // a cascade of competing reconnection attempts, then forceStop to handle
+      // zombie cloudflared processes that may be hung after sleep.
       if (tunnel) {
         try {
           await Promise.race([
             (async () => {
+              tunnel.disableAutoReconnect();
               await tunnel.forceStop(5000);
+              tunnel.enableAutoReconnect();
               const tunnelUrl = await tunnel.start();
               console.log(`[SleepWake] Tunnel restarted: ${tunnelUrl}`);
 
@@ -3138,6 +3140,8 @@ export async function startServer(options: StartOptions): Promise<void> {
           ]);
         } catch (err) {
           console.error(`[SleepWake] Tunnel restart failed:`, err);
+          // Re-enable auto-reconnect even on failure so it can self-heal
+          tunnel.enableAutoReconnect();
         }
       }
 
@@ -4037,6 +4041,21 @@ export async function startServer(options: StartOptions): Promise<void> {
     // the "mutex lock failed" error on next start. This doesn't prevent the crash,
     // but ensures the next boot is clean.
     process.on('uncaughtException', (err) => {
+      // Non-fatal HTTP errors — log and continue, don't crash the server.
+      // "Cannot set headers" is a double-response race condition (common during
+      // tunnel reconnect storms). The affected request is already handled; the
+      // server can keep serving new requests.
+      const nonFatalPatterns = [
+        'Cannot set headers after they are sent',
+        'write after end',
+        'ERR_HTTP_HEADERS_SENT',
+        'ERR_STREAM_WRITE_AFTER_END',
+      ];
+      if (nonFatalPatterns.some(p => err.message?.includes(p))) {
+        console.warn(`[WARN] Non-fatal uncaught exception (suppressed): ${err.message}`);
+        return; // Don't crash — the server is fine
+      }
+
       console.error('[FATAL] Uncaught exception — closing databases before crash:', err.message);
       try { topicMemory?.close(); } catch { /* best effort */ }
       try { semanticMemory?.close(); } catch { /* best effort */ }
