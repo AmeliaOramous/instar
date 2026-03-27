@@ -890,6 +890,24 @@ export class TelegramLifeline {
     if (replayed > 0 || failed > 0 || dropped > 0) {
       console.log(`[Lifeline] Replay complete: ${replayed} delivered, ${failed} re-queued, ${dropped} dropped`);
     }
+
+    // Notify the user that their queued messages were delivered
+    if (replayed > 0) {
+      // Collect unique topics that received replayed messages
+      const replayedTopics = new Set(
+        messages.filter((_, i) => i < replayed + failed + dropped).map(m => m.topicId)
+      );
+      for (const topicId of replayedTopics) {
+        try {
+          const count = messages.filter(m => m.topicId === topicId).length;
+          await this.sendToTopic(topicId,
+            count === 1
+              ? '✓ Server recovered — your queued message has been delivered.'
+              : `✓ Server recovered — ${count} queued messages delivered.`
+          );
+        } catch { /* best effort */ }
+      }
+    }
   }
 
   // ── Notifications ─────────────────────────────────────────

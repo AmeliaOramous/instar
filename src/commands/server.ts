@@ -49,6 +49,7 @@ import { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import { TriageOrchestrator } from '../monitoring/TriageOrchestrator.js';
 import { SessionMonitor } from '../monitoring/SessionMonitor.js';
+import { SessionRecovery } from '../monitoring/SessionRecovery.js';
 import { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { GitSyncManager } from '../core/GitSync.js';
@@ -1912,6 +1913,27 @@ export async function startServer(options: StartOptions): Promise<void> {
             if (!watchdog) return { interventionsTotal: 0, interventionsByLevel: {}, recoveries: 0, sessionDeaths: 0, llmGateOverrides: 0 };
             return watchdog.getStats(sinceMs);
           },
+          // Session recovery stats — lazy getter (declared later in scope via `let`)
+          getRecoveryStats: (_sinceMs: number) => {
+            return { attempts: { stall: 0, crash: 0, errorLoop: 0 }, successes: { stall: 0, crash: 0, errorLoop: 0 } };
+          },
+          // Triage orchestrator stats — lazy getter (declared later in scope via `let`)
+          getTriageStats: (_sinceMs: number) => {
+            return { activations: 0, heuristicResolutions: 0, llmResolutions: 0, failures: 0, actionCounts: {} };
+          },
+          // Notification batcher stats — lazy getter
+          getNotificationStats: () => {
+            if (!notificationBatcher) return { flushed: 0, suppressed: 0, summaryQueueSize: 0, digestQueueSize: 0 };
+            const s = notificationBatcher.getStats();
+            return { flushed: s.totalFlushed, suppressed: s.totalSuppressed, summaryQueueSize: s.summaryQueueSize, digestQueueSize: s.digestQueueSize };
+          },
+          // Process staleness stats — lazy getter
+          getStalenessStats: () => {
+            const pi = ProcessIntegrity.getInstance();
+            if (!pi) return { versionMismatch: false, driftCount: 0 };
+            const drifts = staleGuard.checkAll();
+            return { versionMismatch: pi.versionMismatch, driftCount: drifts.length };
+          },
         });
         telemetryHeartbeat.setCollector(collector);
         console.log(pc.green('  Baseline telemetry collector wired'));
@@ -2727,6 +2749,39 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Triage Orchestrator enabled (replaces Stall Triage Nurse for stall detection)'));
     }
 
+    // SessionRecovery — fast mechanical recovery (JSONL analysis, no LLM)
+    let sessionRecovery: SessionRecovery | undefined;
+    if (telegram) {
+      sessionRecovery = new SessionRecovery(
+        { enabled: true, projectDir: config.projectDir },
+        {
+          isSessionAlive: (name) => sessionManager.isSessionAlive(name),
+          getPanePid: (name) => {
+            try {
+              const tmux = detectTmuxPath();
+              if (!tmux) return null;
+              const pid = execFileSync(tmux, ['list-panes', '-t', `=${name}:`, '-F', '#{pane_pid}'], { encoding: 'utf-8', timeout: 5000 }).trim();
+              return /^\d+$/.test(pid) ? parseInt(pid, 10) : null;
+            } catch { return null; }
+          },
+          killSession: (name) => {
+            try {
+              const tmux = detectTmuxPath();
+              if (!tmux) return;
+              execFileSync(tmux, ['kill-session', '-t', `=${name}`], { encoding: 'utf-8' });
+            } catch { /* may already be dead */ }
+          },
+          respawnSession: async (topicId, _sessionName, recoveryPrompt) => {
+            const targetSession = telegram!.getSessionForTopic(topicId);
+            if (!targetSession) return;
+            await respawnSessionForTopic(sessionManager, telegram!, targetSession, topicId, undefined, topicMemory, undefined, recoveryPrompt, { silent: true });
+          },
+          sendToTopic: async (topicId, message) => { await telegram!.sendToTopic(topicId, message); },
+        },
+      );
+      console.log(pc.green('  Session Recovery enabled (mechanical fast-path)'));
+    }
+
     // SessionMonitor — proactive session health monitoring
     let sessionMonitor: SessionMonitor | undefined;
     if (telegram) {
@@ -2755,6 +2810,7 @@ export async function startServer(options: StartOptions): Promise<void> {
                   return { resolved: result.resolved };
                 }
               : undefined,
+          sessionRecovery,
         },
         config.monitoring.sessionMonitor,
       );

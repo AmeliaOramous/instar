@@ -366,10 +366,23 @@ export class ServerSupervisor extends EventEmitter {
       }
       this.lastHealthCheckAt = now;
 
-      // Skip health checks during startup grace period — server needs time to boot
+      // During startup grace period: probe health optimistically but don't act on failures.
+      // This allows `lastHealthy` to update as soon as the server is responsive, so
+      // TelegramLifeline can forward messages immediately instead of queuing them for
+      // the entire grace period. Failures are ignored — the server is still booting.
       if (this.spawnedAt > 0 && (now - this.spawnedAt) < this.startupGraceMs) {
-        // But still check for restart requests during grace period
         this.checkRestartRequest();
+        // Optimistic health probe — update lastHealthy on success, ignore failures
+        try {
+          const alive = await this.checkHealth();
+          if (alive) {
+            this.lastHealthy = Date.now();
+            if (!this.isRunning) {
+              this.isRunning = true;
+              this.emit('serverUp');
+            }
+          }
+        } catch { /* expected during boot — ignore */ }
         return;
       }
 
