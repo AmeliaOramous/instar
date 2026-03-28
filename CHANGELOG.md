@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.14] - 2026-03-28
+
+### Added
+- Message Queue & Status System documentation (Phases 2 & 3)
+- GitHub Actions PR review workflow for automated CI checks
+- Comprehensive implementation guide for non-blocking message handling
+- Agentless status endpoint architecture for all Instar agents
+
+### Changed
+- Updated builtin manifest to reflect Instar 0.24.13 changes
+
 ## [0.19.2] - 2026-03-13
 
 ### Fixed
