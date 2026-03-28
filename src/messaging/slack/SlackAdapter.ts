@@ -11,6 +11,11 @@
  * - authorizedUserIds is required and fail-closed
  * - Ring buffer scoped to authorized users only
  * - JSON-encoded context files (no delimiter-based injection)
+ *
+ * Required bot scopes (each event subscription requires its read scope):
+ *   app_mentions:read, channels:history, channels:manage, channels:read,
+ *   chat:write, files:read, groups:history, im:history, im:read, im:write,
+ *   pins:write, reactions:read, reactions:write, users:read
  */
 
 import path from 'node:path';
@@ -55,11 +60,21 @@ export class SlackAdapter implements MessagingAdapter {
   private housekeepingTimer: ReturnType<typeof setInterval> | null = null;
   private logPurgeTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Channel ↔ Session Registry (persisted to disk)
+  private channelToSession: Map<string, { sessionName: string; channelName?: string; registeredAt: string }> = new Map();
+  private channelRegistryPath: string;
+
+  // Channel Resume Map (persisted — maps channel IDs to Claude session UUIDs for resume)
+  private channelResumeMap: Map<string, { uuid: string; savedAt: string; sessionName: string }> = new Map();
+  private channelResumeMapPath: string;
+
   // Callbacks (wired by server.ts)
   /** Called when a prompt gate response is received */
   onPromptResponse: ((channelId: string, promptId: string, value: string) => void) | null = null;
   /** Called when a message is logged (for dual-write to SQLite) */
   onMessageLogged: ((entry: LogEntry) => void) | null = null;
+  /** Called when a stall is detected */
+  onStallDetected: ((channelId: string, sessionName: string, messageText: string) => void) | null = null;
 
   constructor(config: Record<string, unknown>, stateDir: string) {
     this.config = config as unknown as SlackConfig;
@@ -81,7 +96,8 @@ export class SlackAdapter implements MessagingAdapter {
     // Initialize components
     this.apiClient = new SlackApiClient(this.config.botToken, this.config.appToken);
 
-    const agentName = this.config.workspaceName?.replace(/-agent$/, '') || 'agent';
+    const rawAgentName = this.config.workspaceName?.replace(/-agent$/i, '') || 'agent';
+    const agentName = rawAgentName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
     this.channelManager = new ChannelManager(this.apiClient, agentName);
     this.fileHandler = new FileHandler(this.apiClient, this.config.botToken, stateDir);
     this.logger = new MessageLogger({
@@ -89,6 +105,12 @@ export class SlackAdapter implements MessagingAdapter {
       maxLines: 100_000,
       keepLines: 75_000,
     });
+
+    // Channel registry and resume map persistence
+    this.channelRegistryPath = path.join(stateDir, 'slack-channel-registry.json');
+    this.channelResumeMapPath = path.join(stateDir, 'slack-channel-resume-map.json');
+    this._loadChannelRegistry();
+    this._loadChannelResumeMap();
   }
 
   // ── MessagingAdapter Interface ──
@@ -114,7 +136,15 @@ export class SlackAdapter implements MessagingAdapter {
     };
 
     this.socketClient = new SocketModeClient(this.apiClient, handlers);
-    await this.socketClient.connect();
+
+    // Connect with a 15-second timeout to prevent server startup hangs
+    const SLACK_CONNECT_TIMEOUT_MS = 15000;
+    const connectPromise = this.socketClient.connect();
+    const timeoutPromise = new Promise<void>((_resolve, reject) => {
+      setTimeout(() => reject(new Error('Slack Socket Mode connection timeout after 15s')), SLACK_CONNECT_TIMEOUT_MS);
+    });
+
+    await Promise.race([connectPromise, timeoutPromise]);
     this.started = true;
 
     // Start pending prompt TTL eviction
@@ -282,6 +312,120 @@ export class SlackAdapter implements MessagingAdapter {
     return this.apiClient;
   }
 
+  // ── Channel ↔ Session Registry ──
+
+  /** Register a channel → session binding. Persisted to disk. */
+  registerChannelSession(channelId: string, sessionName: string, channelName?: string): void {
+    this.channelToSession.set(channelId, {
+      sessionName,
+      channelName,
+      registeredAt: new Date().toISOString(),
+    });
+    this._saveChannelRegistry();
+  }
+
+  /** Look up which session is bound to a channel. */
+  getSessionForChannel(channelId: string): string | null {
+    return this.channelToSession.get(channelId)?.sessionName ?? null;
+  }
+
+  /** Look up which channel is bound to a session. */
+  getChannelForSession(sessionName: string): string | null {
+    for (const [channelId, entry] of this.channelToSession) {
+      if (entry.sessionName === sessionName) return channelId;
+    }
+    return null;
+  }
+
+  /** Remove a channel → session binding. */
+  unregisterChannel(channelId: string): void {
+    this.channelToSession.delete(channelId);
+    this._saveChannelRegistry();
+  }
+
+  /** Get all channel → session mappings. */
+  getChannelRegistry(): Record<string, { sessionName: string; channelName?: string }> {
+    const result: Record<string, { sessionName: string; channelName?: string }> = {};
+    for (const [channelId, entry] of this.channelToSession) {
+      result[channelId] = { sessionName: entry.sessionName, channelName: entry.channelName };
+    }
+    return result;
+  }
+
+  // ── Channel Resume Map ──
+
+  /** Save a session UUID for resume when a channel goes idle. */
+  saveChannelResume(channelId: string, uuid: string, sessionName: string): void {
+    this.channelResumeMap.set(channelId, {
+      uuid,
+      savedAt: new Date().toISOString(),
+      sessionName,
+    });
+    this._saveChannelResumeMap();
+  }
+
+  /** Get the resume UUID for a channel (returns null if none or expired). */
+  getChannelResume(channelId: string): { uuid: string; sessionName: string } | null {
+    const entry = this.channelResumeMap.get(channelId);
+    if (!entry) return null;
+    // Expire entries older than 24 hours
+    const age = Date.now() - new Date(entry.savedAt).getTime();
+    if (age > 24 * 60 * 60 * 1000) {
+      this.channelResumeMap.delete(channelId);
+      this._saveChannelResumeMap();
+      return null;
+    }
+    return { uuid: entry.uuid, sessionName: entry.sessionName };
+  }
+
+  /** Remove a resume entry (consumed after resume). */
+  removeChannelResume(channelId: string): void {
+    this.channelResumeMap.delete(channelId);
+    this._saveChannelResumeMap();
+  }
+
+  // ── Registry Persistence ──
+
+  private _loadChannelRegistry(): void {
+    try {
+      if (fs.existsSync(this.channelRegistryPath)) {
+        const data = JSON.parse(fs.readFileSync(this.channelRegistryPath, 'utf-8'));
+        for (const [k, v] of Object.entries(data.channelToSession ?? {})) {
+          this.channelToSession.set(k, v as { sessionName: string; channelName?: string; registeredAt: string });
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  private _saveChannelRegistry(): void {
+    try {
+      const data = { channelToSession: Object.fromEntries(this.channelToSession) };
+      const tmp = this.channelRegistryPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+      fs.renameSync(tmp, this.channelRegistryPath);
+    } catch { /* non-fatal */ }
+  }
+
+  private _loadChannelResumeMap(): void {
+    try {
+      if (fs.existsSync(this.channelResumeMapPath)) {
+        const data = JSON.parse(fs.readFileSync(this.channelResumeMapPath, 'utf-8'));
+        for (const [k, v] of Object.entries(data)) {
+          this.channelResumeMap.set(k, v as { uuid: string; savedAt: string; sessionName: string });
+        }
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  private _saveChannelResumeMap(): void {
+    try {
+      const data = Object.fromEntries(this.channelResumeMap);
+      const tmp = this.channelResumeMapPath + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+      fs.renameSync(tmp, this.channelResumeMapPath);
+    } catch { /* non-fatal */ }
+  }
+
   // ── Test Helpers (underscore-prefixed) ──
 
   /** Inject a simulated message for testing. */
@@ -321,6 +465,14 @@ export class SlackAdapter implements MessagingAdapter {
     // AuthGate — fail-closed
     if (!this.isAuthorized(userId)) {
       return; // Silently drop unauthorized messages
+    }
+
+    // Handle commands (Slack intercepts / prefix, so we use ! prefix)
+    // Supports both !command and /command (in case Slack delivers it)
+    if (text.startsWith('!') || text.startsWith('/')) {
+      const normalizedText = text.startsWith('!') ? '/' + text.slice(1) : text;
+      const handled = await this._handleSlashCommand(normalizedText, channelId, ts);
+      if (handled) return;
     }
 
     // Populate ring buffer (authorized messages only — prevents cache poisoning)
@@ -589,16 +741,39 @@ export class SlackAdapter implements MessagingAdapter {
    * Broadcast the tunnel URL to the dashboard channel.
    * Called by server.ts when tunnel is established.
    */
+  /** Last broadcast dashboard URL and message timestamp (for update-in-place) */
+  private lastDashboardUrl: string | null = null;
+  private lastDashboardMessageTs: string | null = null;
+
   async broadcastDashboardUrl(tunnelUrl: string): Promise<void> {
     const dashboardChannelId = this.config.dashboardChannelId;
     if (!dashboardChannelId) return;
 
+    // Skip if URL hasn't changed
+    if (this.lastDashboardUrl === tunnelUrl) return;
+
     const text = `Dashboard available at: ${tunnelUrl}`;
     try {
-      await this.sendToChannel(dashboardChannelId, text);
-      await this.pinMessage(dashboardChannelId, (await this.sendToChannel(dashboardChannelId, text)));
+      if (this.lastDashboardMessageTs) {
+        // Update existing message in-place
+        await this.updateMessage(dashboardChannelId, this.lastDashboardMessageTs, text);
+      } else {
+        // First time — post new message and pin it
+        const ts = await this.sendToChannel(dashboardChannelId, text);
+        this.lastDashboardMessageTs = ts;
+        try { await this.pinMessage(dashboardChannelId, ts); } catch { /* already pinned or can't pin */ }
+      }
+      this.lastDashboardUrl = tunnelUrl;
     } catch (err) {
-      console.error('[slack] Dashboard broadcast failed:', (err as Error).message);
+      // If update fails (message deleted?), post new
+      try {
+        const ts = await this.sendToChannel(dashboardChannelId, text);
+        this.lastDashboardMessageTs = ts;
+        this.lastDashboardUrl = tunnelUrl;
+        try { await this.pinMessage(dashboardChannelId, ts); } catch { /* ignore */ }
+      } catch (err2) {
+        console.error('[slack] Dashboard broadcast failed:', (err2 as Error).message);
+      }
     }
   }
 
@@ -621,6 +796,62 @@ export class SlackAdapter implements MessagingAdapter {
       }
     }
     return unanswered;
+  }
+
+  // ── Slash Commands (Telegram parity) ──
+
+  /** Handle slash commands from Slack messages. Returns true if handled. */
+  private async _handleSlashCommand(text: string, channelId: string, ts: string): Promise<boolean> {
+    const parts = text.trim().split(/\s+/);
+    const cmd = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+
+    switch (cmd) {
+      case '/sessions': {
+        // List running sessions
+        const sessions = this.getChannelRegistry();
+        const lines = Object.entries(sessions).map(([chId, info]) =>
+          `• ${info.sessionName}${info.channelName ? ` (#${info.channelName})` : ` (${chId})`}`
+        );
+        const reply = lines.length > 0
+          ? `Running Slack sessions:\n${lines.join('\n')}`
+          : 'No active Slack sessions.';
+        await this.sendToChannel(channelId, reply);
+        return true;
+      }
+
+      case '/new': {
+        // Create new session with Slack channel
+        const name = args || `session-${Date.now()}`;
+        const channelName = `${(this.config.workspaceName?.replace(/-agent$/i, '') || 'agent').toLowerCase().replace(/[^a-z0-9]/g, '-')}-sess-${name.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40)}`;
+        try {
+          const newChannelId = await this.createChannel(channelName);
+          // Invite authorized users
+          for (const uid of this.config.authorizedUserIds) {
+            this.apiClient.call('conversations.invite', { channel: newChannelId, users: uid }).catch(() => {});
+          }
+          await this.sendToChannel(channelId, `Created new session channel: #${channelName}`);
+          await this.sendToChannel(newChannelId, `Session "${name}" is ready. Send a message here to start working.`);
+        } catch (err) {
+          await this.sendToChannel(channelId, `Failed to create session: ${(err as Error).message}`);
+        }
+        return true;
+      }
+
+      case '/help': {
+        await this.sendToChannel(channelId,
+          `Available commands (use \`!\` prefix in Slack — Slack intercepts \`/\`):\n` +
+          `• \`!sessions\` — List running Slack sessions\n` +
+          `• \`!new [name]\` — Create a new session with a Slack channel\n` +
+          `• \`!help\` — Show this help message`
+        );
+        return true;
+      }
+
+      default:
+        // Unknown command — don't handle, let it pass through as a regular message
+        return false;
+    }
   }
 
   private _chunkText(text: string): string[] {
