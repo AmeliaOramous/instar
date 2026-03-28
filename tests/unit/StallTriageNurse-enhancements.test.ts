@@ -28,6 +28,7 @@ function createMockDeps(overrides?: Partial<TriageDeps>): TriageDeps {
     sendToTopic: vi.fn().mockResolvedValue({}),
     respawnSession: vi.fn().mockResolvedValue(undefined),
     clearStallForTopic: vi.fn(),
+    getStuckProcesses: vi.fn().mockResolvedValue([]), // Empty by default, override in specific tests
     ...overrides,
   };
 }
