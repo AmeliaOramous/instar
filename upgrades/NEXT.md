@@ -1,29 +1,35 @@
 # Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
+<!-- Valid values: patch, minor, major -->
+<!-- patch = bug fixes, refactors, test additions, doc updates -->
+<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
+<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-**Session error nudge: automatic recovery from API errors.** When a session hits an API error (400 "Could not process image", rate limits, timeouts, network errors) and goes idle at the prompt, the session manager now detects the error in the terminal output and injects a nudge message to get the session working again.
-
-Previously, API errors that caused Claude to stop and return to the idle prompt were invisible to the recovery system — it only analyzed the JSONL conversation log, which looked clean after such errors. The zombie detector would kill the session 15 minutes later with no recovery.
-
-**How it works:**
-1. SessionManager's monitor tick detects a session is newly idle at the prompt
-2. Captures 30 lines of terminal output and checks for error patterns (API Error, invalid_request_error, rate_limit_error, timeouts, network errors)
-3. If an error is found: injects "You hit an API error. Please continue your work — skip or work around the action that failed."
-4. Resets the idle timer so the zombie detector doesn't kill immediately
-5. Each session gets ONE nudge — if it goes idle again after the nudge, the normal 15-minute zombie kill proceeds
-
-Also expanded crash-detector.ts error classification to include 400, 502, invalid_request_error, and overloaded_error as API error types.
+<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
+<!-- Write this for the AGENT — they need to understand the system deeply. -->
 
 ## What to Tell Your User
 
-- **Session error recovery**: "If your agent hits an API error mid-work (like an image it can't process), it will now automatically get nudged to continue instead of just stopping. Previously, those errors would leave the session dead at the prompt until the zombie detector cleaned it up 15 minutes later."
+<!-- Write talking points the agent should relay to their user. -->
+<!-- This should be warm, conversational, user-facing — not a changelog. -->
+<!-- Focus on what THEY can now do, not internal plumbing. -->
+<!--                                                                    -->
+<!-- PROHIBITED in this section (will fail validation):                 -->
+<!--   camelCase config keys: silentReject, maxRetries, telegramNotify -->
+<!--   Inline code backtick references like silentReject: false        -->
+<!--   Fenced code blocks                                              -->
+<!--   Instructions to edit files or run commands                      -->
+<!--                                                                    -->
+<!-- CORRECT style: "I can turn that on for you" not "set X to false"  -->
+<!-- The agent relays this to their user — keep it human.              -->
+
+- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Session error nudge | Automatic — detects API errors in terminal output and nudges to continue |
-| Expanded error classification | Automatic — 400, 502, overloaded errors now classified as API type |
+| [Capability] | [Endpoint, command, or "automatic"] |
