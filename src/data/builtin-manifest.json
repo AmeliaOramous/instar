@@ -1,8 +1,8 @@
 {
   "$schema": "./builtin-manifest.schema.json",
   "schemaVersion": 1,
-  "generatedAt": "2026-03-29T21:40:54.187Z",
-  "instarVersion": "0.24.32",
+  "generatedAt": "2026-03-29T22:44:43.627Z",
+  "instarVersion": "0.24.34",
   "entryCount": 179,
   "entries": {
     "hook:session-start": {
@@ -1352,7 +1352,7 @@
       "type": "subsystem",
       "domain": "sessions",
       "sourcePath": "src/core/SessionManager.ts",
-      "contentHash": "ed93a8e919213546fda5e6a116697be2dce9968fe512a1cc4ea5e78846f97ef7",
+      "contentHash": "869642132b1ffd1e22d6f7bfaa7062e49c39f4cb8041d9b3c6b3e4440e02e19d",
       "since": "2025-01-01"
     },
     "subsystem:auto-updater": {
