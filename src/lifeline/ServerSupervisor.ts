@@ -82,6 +82,8 @@ export class ServerSupervisor extends EventEmitter {
   private lastCrashOutput = ''; // Last captured crash output for diagnostics
   private doctorSessionSecret: string | null = null; // HMAC secret for doctor restart requests
   private sleepWakeDetector: SleepWakeDetector | null = null; // Detects short sleeps that gap-based detection misses
+  private wakeTransitionUntil = 0; // Timestamp until which we're in a wake transition (lenient health checks)
+  private readonly wakeTransitionMs = 60_000; // 60 seconds of lenient health checking after wake
 
   constructor(options: {
     projectDir: string;
@@ -212,12 +214,15 @@ export class ServerSupervisor extends EventEmitter {
     maxCircuitBreakerRetries: number;
     inMaintenanceWait: boolean;
     maintenanceWaitElapsedMs: number;
+    inWakeTransition: boolean;
+    wakeTransitionRemainingMs: number;
   } {
     const coolingDown = this.maxRetriesExhaustedAt > 0;
     const cooldownRemainingMs = coolingDown
       ? Math.max(0, this.retryCooldownMs - (Date.now() - this.maxRetriesExhaustedAt))
       : 0;
     const inMaintenanceWait = this.maintenanceWaitStartedAt > 0;
+    const inWakeTransition = Date.now() < this.wakeTransitionUntil;
     return {
       running: this.isRunning,
       healthy: this.healthy,
@@ -233,6 +238,8 @@ export class ServerSupervisor extends EventEmitter {
       maxCircuitBreakerRetries: this.maxCircuitBreakerRetries,
       inMaintenanceWait,
       maintenanceWaitElapsedMs: inMaintenanceWait ? Date.now() - this.maintenanceWaitStartedAt : 0,
+      inWakeTransition,
+      wakeTransitionRemainingMs: inWakeTransition ? this.wakeTransitionUntil - Date.now() : 0,
     };
   }
 
@@ -249,6 +256,7 @@ export class ServerSupervisor extends EventEmitter {
     this.restartAttempts = 0;
     this.maxRetriesExhaustedAt = 0;
     this.slowRetryStartedAt = 0;
+    this.wakeTransitionUntil = 0;
     console.log('[Supervisor] Circuit breaker reset');
   }
 
@@ -495,7 +503,9 @@ export class ServerSupervisor extends EventEmitter {
     // detection below misses (its 2-minute threshold is too high for brief suspends).
     // On wake, reset failure counters so stale pre-sleep failures don't cascade.
     if (!this.sleepWakeDetector) {
-      this.sleepWakeDetector = new SleepWakeDetector();
+      // Lower drift threshold to 5s (from default 10s) to catch brief sleeps/power naps
+      // that still cause health check failures during the transition.
+      this.sleepWakeDetector = new SleepWakeDetector({ driftThresholdMs: 5000 });
       this.sleepWakeDetector.on('wake', (event: { sleepDurationSeconds: number }) => {
         console.log(`[Supervisor] SleepWakeDetector: wake after ~${event.sleepDurationSeconds}s. Resetting failure counters.`);
         this.restartAttempts = 0;
@@ -504,6 +514,7 @@ export class ServerSupervisor extends EventEmitter {
         this.totalFailures = 0;
         this.totalFailureWindowStart = 0;
         this.spawnedAt = Date.now();
+        this.wakeTransitionUntil = Date.now() + this.wakeTransitionMs;
       });
       this.sleepWakeDetector.start();
     }
@@ -525,6 +536,7 @@ export class ServerSupervisor extends EventEmitter {
         this.totalFailureWindowStart = 0;
         // Give the server the full startup grace period from wake time
         this.spawnedAt = now;
+        this.wakeTransitionUntil = now + this.wakeTransitionMs;
       }
       this.lastHealthCheckAt = now;
 
@@ -583,13 +595,26 @@ export class ServerSupervisor extends EventEmitter {
         } else {
           this.consecutiveFailures++;
           if (this.consecutiveFailures >= this.unhealthyThreshold) {
-            this.handleUnhealthy();
+            // During wake transitions, don't kill a server that's still alive — it's
+            // likely just slow to respond while the system recovers (disk I/O, network
+            // reconfig, SQLite WAL replay). Only act if the server process is actually dead.
+            if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
+              console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
+              this.consecutiveFailures = 0; // Reset so we don't immediately re-trigger
+            } else {
+              this.handleUnhealthy();
+            }
           }
         }
       } catch {
         this.consecutiveFailures++;
         if (this.consecutiveFailures >= this.unhealthyThreshold) {
-          this.handleUnhealthy();
+          if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
+            console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
+            this.consecutiveFailures = 0;
+          } else {
+            this.handleUnhealthy();
+          }
         }
       }
 

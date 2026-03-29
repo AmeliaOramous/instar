@@ -202,8 +202,9 @@ async function handleFixCommand(topicId: number, text: string, deps: FixCommandD
   }
 
   if (cmd === 'restart') {
-    // Request a graceful server restart
-    const restartFile = path.join(deps.config.stateDir, 'restart-requested.json');
+    // Request a graceful server restart — write to state/ subdirectory where
+    // the supervisor and ForegroundRestartWatcher poll for it.
+    const restartFile = path.join(deps.config.stateDir, 'state', 'restart-requested.json');
     fs.writeFileSync(restartFile, JSON.stringify({
       requestedAt: new Date().toISOString(),
       reason: 'User requested restart via Agent Attention fix command',
@@ -441,13 +442,11 @@ async function spawnSessionForTopic(
     const filepath = path.join(tmpDir, `history-${topicId}-${Date.now()}-${process.pid}.txt`);
     fs.writeFileSync(filepath, contextContent);
 
-    // Truncate inline context to keep injection manageable.
-    // Summary + last ~10 messages is usually under 4KB — enough for continuity.
-    // Full history remains in the file for deeper searches.
-    const MAX_INLINE_CHARS = 4000;
-    const inlineContext = contextContent.length > MAX_INLINE_CHARS
-      ? contextContent.slice(0, MAX_INLINE_CHARS) + `\n... (full history: ${filepath})`
-      : contextContent;
+    // Inject the FULL context inline — no truncation.
+    // Claude handles context management via compaction. Pre-truncating strips
+    // recent messages and makes resumed sessions feel like they lost memory.
+    // The session should feel like it never stopped.
+    const inlineContext = contextContent;
 
     const parts = [
       `CONTINUATION — You are resuming an EXISTING conversation. Read the context below before responding.`,

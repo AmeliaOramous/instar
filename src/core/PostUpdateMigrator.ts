@@ -493,6 +493,66 @@ export class PostUpdateMigrator {
   }
 
   /**
+   * Ensure autonomous stop hook is registered and the skill files are deployed.
+   * This is the structural enforcement for /autonomous mode — without it,
+   * sessions exit normally after each response instead of looping on the task list.
+   */
+  private ensureAutonomousStopHook(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    let patched = false;
+
+    // 1. Deploy skill hooks directory if missing
+    const skillHooksDir = path.join(this.config.projectDir, '.claude', 'skills', 'autonomous', 'hooks');
+    const hookScript = path.join(skillHooksDir, 'autonomous-stop-hook.sh');
+    const hooksJson = path.join(skillHooksDir, 'hooks.json');
+
+    if (!fs.existsSync(hookScript)) {
+      // Copy from bundled source
+      const bundledDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous', 'hooks');
+      if (fs.existsSync(bundledDir)) {
+        fs.mkdirSync(skillHooksDir, { recursive: true });
+        const bundledHook = path.join(bundledDir, 'autonomous-stop-hook.sh');
+        const bundledJson = path.join(bundledDir, 'hooks.json');
+        if (fs.existsSync(bundledHook)) {
+          fs.copyFileSync(bundledHook, hookScript);
+          fs.chmodSync(hookScript, 0o755);
+        }
+        if (fs.existsSync(bundledJson) && !fs.existsSync(hooksJson)) {
+          fs.copyFileSync(bundledJson, hooksJson);
+        }
+        result.upgraded.push('.claude/skills/autonomous/hooks: deployed stop hook files');
+        patched = true;
+      }
+    }
+
+    // 2. Register in settings.json Stop hooks if missing
+    if (!hooks.Stop) {
+      hooks.Stop = [];
+    }
+    const stopEntries = hooks.Stop as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
+    const hasAutonomousHook = stopEntries.some(e =>
+      e.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
+    );
+    if (!hasAutonomousHook) {
+      // Must be first in the Stop chain so it blocks before other hooks run
+      (hooks.Stop as unknown[]).unshift({
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'bash .claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
+          timeout: 10000,
+        }],
+      });
+      result.upgraded.push('.claude/settings.json: registered autonomous stop hook (structural enforcement)');
+      patched = true;
+    }
+
+    return patched;
+  }
+
+  /**
    * Replace HTTP hooks with command hooks that use hook-event-reporter.js.
    * Claude Code HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
    * This migration converts them to command hooks which reliably fire.
@@ -1227,6 +1287,14 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     // Ensure PermissionRequest auto-approve hook exists — subagents don't inherit
     // --dangerously-skip-permissions, so they'd prompt without this catch-all.
     if (this.ensurePermissionAutoApprove(hooks, result)) {
+      patched = true;
+    }
+
+    // Ensure autonomous stop hook is registered — structural enforcement for /autonomous mode.
+    // Without this, autonomous sessions have no hook to block exit and feed tasks back,
+    // so they just stop after each response. This was a critical gap where the hook files
+    // existed but were never registered in settings.json.
+    if (this.ensureAutonomousStopHook(hooks, result)) {
       patched = true;
     }
 

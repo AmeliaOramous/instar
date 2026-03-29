@@ -3159,7 +3159,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const { name, color } = req.body;
+    const { name, color, firstMessage } = req.body;
     if (!name || typeof name !== 'string' || name.trim().length < 1) {
       res.status(400).json({ error: '"name" is required (non-empty string)' });
       return;
@@ -3168,16 +3168,32 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"name" must be 128 characters or fewer' });
       return;
     }
+    if (firstMessage !== undefined && (typeof firstMessage !== 'string' || firstMessage.length > 4096)) {
+      res.status(400).json({ error: '"firstMessage" must be a string of 4096 characters or fewer' });
+      return;
+    }
 
     // Color is optional — defaults to green (9367192)
     const iconColor = typeof color === 'number' ? color : 9367192;
 
     try {
-      const topic = await ctx.telegram.createForumTopic(name.trim(), iconColor);
-      res.status(201).json({
+      const topic = await ctx.telegram.findOrCreateForumTopic(name.trim(), iconColor);
+
+      // Send initial message if provided — goes through sendToTopic so it's
+      // properly logged to JSONL + TopicMemory. This ensures new sessions
+      // spawned in this topic will see the context in their thread history.
+      let messageSent = false;
+      if (firstMessage && !topic.reused) {
+        await ctx.telegram.sendToTopic(topic.topicId, firstMessage);
+        messageSent = true;
+      }
+
+      res.status(topic.reused ? 200 : 201).json({
         topicId: topic.topicId,
         name: name.trim(),
-        created: true,
+        created: !topic.reused,
+        reused: topic.reused,
+        messageSent,
       });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
