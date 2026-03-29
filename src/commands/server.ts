@@ -2555,20 +2555,29 @@ export async function startServer(options: StartOptions): Promise<void> {
               // Wait for Claude to be ready (handles race with recently spawned sessions)
               const ready = await sessionManager.waitForClaudeReady(existingSession, 15000);
               if (!ready) {
-                console.warn(`[slack→session] Session ${existingSession} not ready after 15s — injecting anyway`);
+                // Session is stuck (permissions prompt, tool hang, etc.)
+                // Kill it and fall through to spawn a fresh session — never silently lose messages
+                console.warn(`[slack→session] Session ${existingSession} not ready after 15s — killing and respawning`);
+                try {
+                  const stuckSession = sessionManager.listRunningSessions().find(s => s.tmuxSession === existingSession);
+                  if (stuckSession) {
+                    sessionManager.killSession(stuckSession.id);
+                  }
+                } catch { /* ok if already dead */ }
+                // Fall through to respawn below — registerChannelSession will be called with new session name
+              } else {
+                // Session is ready — inject the message
+                try {
+                  const { execSync } = await import('node:child_process');
+                  const msgFile = path.join(tmpDir, `inject-${Date.now()}.txt`);
+                  fs.writeFileSync(msgFile, bootstrapMessage);
+                  execSync(`tmux send-keys -t '=${existingSession}:' "$(cat '${msgFile}')" Enter`, { timeout: 5000 });
+                  fs.unlinkSync(msgFile);
+                } catch (injectErr) {
+                  console.error(`[slack→session] Injection failed: ${injectErr instanceof Error ? injectErr.message : injectErr}`);
+                }
+                return;
               }
-              // Use tmux send-keys to inject the message (same as Telegram's injection pattern)
-              try {
-                const { execSync } = await import('node:child_process');
-                // Write to a temp file and send via tmux to avoid escaping issues
-                const msgFile = path.join(tmpDir, `inject-${Date.now()}.txt`);
-                fs.writeFileSync(msgFile, bootstrapMessage);
-                execSync(`tmux send-keys -t '=${existingSession}:' "$(cat '${msgFile}')" Enter`, { timeout: 5000 });
-                fs.unlinkSync(msgFile);
-              } catch (injectErr) {
-                console.error(`[slack→session] Injection failed: ${injectErr instanceof Error ? injectErr.message : injectErr}`);
-              }
-              return;
             }
             console.log(`[slack→session] Session "${existingSession}" died, respawning...`);
           }
