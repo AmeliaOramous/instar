@@ -2491,19 +2491,36 @@ export async function startServer(options: StartOptions): Promise<void> {
           const history = slackAdapter!.getChannelMessages(channelId, 30);
           const unansweredCount = slackAdapter!.getUnansweredCount(channelId);
 
-          const contextData = JSON.stringify({
-            topicId: channelId,
-            channelName: channelId,
-            messages: history.map(m => ({
-              ts: m.ts,
-              sender: m.user,
-              senderId: m.user,
-              fromUser: true,
-              text: m.text,
-            })),
-            unansweredCount,
-            relayInstructions: `cat <<'EOF' | .claude/scripts/slack-reply.sh ${channelId}\nYour response text here\nEOF`,
-          }, null, 2);
+          const botUserId = slackAdapter!.getBotUserId?.() ?? null;
+
+          // Build human-readable thread history (matches Telegram's context format)
+          const lines: string[] = [];
+          lines.push(`--- Thread History (last ${history.length} messages) ---`);
+          lines.push('IMPORTANT: Read this history carefully before taking any action.');
+          lines.push('Your task is to continue THIS conversation, not start something new.');
+          lines.push(`Channel: ${channelId}`);
+          lines.push('');
+          for (const m of history) {
+            const date = new Date(parseFloat(m.ts) * 1000);
+            const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            const isBot = botUserId && m.user === botUserId;
+            const label = isBot ? 'Agent' : (senderName || m.user);
+            lines.push(`[${time}] ${label}: ${m.text}`);
+          }
+          lines.push('');
+          lines.push('--- End Thread History ---');
+          lines.push('');
+          lines.push('CRITICAL: You MUST relay your response back to Slack after responding.');
+          lines.push('Use the relay script:');
+          lines.push('');
+          lines.push(`cat <<'EOF' | .claude/scripts/slack-reply.sh ${channelId}`);
+          lines.push('Your response text here');
+          lines.push('EOF');
+          lines.push('');
+          lines.push('Strip the [slack:] prefix before interpreting the message.');
+          lines.push('Only relay conversational text — not tool output or internal reasoning.');
+
+          const contextData = lines.join('\n');
           fs.writeFileSync(ctxPath, contextData);
 
           // Transform [image:path] and [document:path] tags into explicit read instructions
@@ -3564,6 +3581,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             // Convert Slack channelId to synthetic numeric ID for PresenceProxy
             if (!entry.channelId) return;
             const syntheticId = slackChannelToSyntheticId(String(entry.channelId));
+            console.log(`[slack-proxy] onMessageLogged: channel=${entry.channelId} syntheticId=${syntheticId} fromUser=${entry.fromUser} text="${(entry.text || '').slice(0, 40)}"`);
             presenceProxy!.onMessageLogged({
               messageId: typeof entry.messageId === 'number' ? entry.messageId : parseInt(String(entry.messageId), 10) || 0,
               channelId: syntheticId.toString(),

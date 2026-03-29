@@ -258,6 +258,11 @@ export class SlackAdapter implements MessagingAdapter {
     };
   }
 
+  /** Get the bot's own Slack user ID (for distinguishing bot vs user messages). */
+  getBotUserId(): string | null {
+    return this.botUserId;
+  }
+
   /** Check if a user is authorized. */
   isAuthorized(userId: string): boolean {
     return this.authorizedUsers.has(userId);
@@ -508,12 +513,20 @@ export class SlackAdapter implements MessagingAdapter {
     const threadTs = event.thread_ts as string | undefined;
     const files = event.files as Array<Record<string, unknown>> | undefined;
 
-    // Skip bot messages and most subtypes (edits, deletes, etc.)
+    // Skip most subtypes (edits, deletes, etc.)
     // Allow file_share subtype through — that's how Slack sends messages with attachments
-    if (event.bot_id) return;
     const subtype = event.subtype as string | undefined;
     if (subtype && subtype !== 'file_share') return;
     if (!userId || !channelId) return;
+
+    // Bot messages: store in ring buffer for context but don't process as user input
+    // This ensures spawned sessions see the full conversation (both sides).
+    if (event.bot_id) {
+      const buffer = this.channelHistory.get(channelId) ?? new RingBuffer<SlackMessage>(RING_BUFFER_CAPACITY);
+      buffer.push({ ts, user: userId, text, channel: channelId, thread_ts: threadTs });
+      this.channelHistory.set(channelId, buffer);
+      return;
+    }
 
     // AuthGate — fail-closed
     if (!this.isAuthorized(userId)) {
