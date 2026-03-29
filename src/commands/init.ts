@@ -32,7 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { detectTmuxPath, detectClaudePath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir, getInstarVersion } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { allocatePort, registerAgent, validateAgentName } from '../core/AgentRegistry.js';
@@ -53,6 +53,24 @@ import {
   generateSoulMd,
 } from '../scaffold/templates.js';
 import type { InstarConfig } from '../core/types.js';
+
+/**
+ * Find a free port in the default range (4040-4099) by checking if anything
+ * is listening. Used as fallback when allocatePort() fails (e.g., registry
+ * is corrupted or locked).
+ */
+function findFreePortFallback(): number {
+  for (let port = 4040; port <= 4099; port++) {
+    try {
+      execSync(`lsof -iTCP:${port} -sTCP:LISTEN -P -n`, { stdio: 'ignore' });
+      // lsof found a listener — port is in use
+    } catch {
+      // lsof found nothing — port is free
+      return port;
+    }
+  }
+  return 4040; // All ports in range are busy — return default and let server fail with a clear error
+}
 
 interface InitOptions {
   dir?: string;
@@ -151,7 +169,7 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
       port = allocatePort(projectDir);
       console.log(`  ${pc.green('✓')} Auto-allocated port ${port} (from ~/.instar/registry.json)`);
     } catch {
-      port = 4040; // Fallback to default
+      port = findFreePortFallback();
     }
   }
 
@@ -458,7 +476,7 @@ async function initExistingProject(options: InitOptions): Promise<void> {
     try {
       port = allocatePort(projectDir);
     } catch {
-      port = 4040;
+      port = findFreePortFallback();
     }
   }
 
@@ -810,7 +828,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
       port = allocatePort(projectDir);
       console.log(`  ${pc.green('✓')} Auto-allocated port ${port}`);
     } catch {
-      port = 4040;
+      port = findFreePortFallback();
     }
   }
 
@@ -2462,6 +2480,52 @@ Write sync results to \\\`.instar/state/job-handoff-git-sync.md\\\`:
     if (!fs.existsSync(skillFile)) {
       fs.mkdirSync(skillDir, { recursive: true });
       fs.writeFileSync(skillFile, skill.content);
+    }
+  }
+
+  // Install autonomous skill with hooks and scripts (special case — needs full directory structure)
+  installAutonomousSkill(skillsDir);
+}
+
+/**
+ * Install the autonomous skill with its stop hook and setup script.
+ * Unlike simple skills (just a SKILL.md), autonomous mode requires:
+ * - hooks/hooks.json — registers the stop hook with Claude Code
+ * - hooks/autonomous-stop-hook.sh — structural enforcement script
+ * - scripts/setup-autonomous.sh — state file creation
+ *
+ * The stop hook is the critical piece — without it, autonomous mode has
+ * no structural enforcement and sessions exit normally after each response.
+ */
+function installAutonomousSkill(skillsDir: string): void {
+  const autonomousDir = path.join(skillsDir, 'autonomous');
+  const hooksDir = path.join(autonomousDir, 'hooks');
+  const scriptsDir = path.join(autonomousDir, 'scripts');
+
+  // Copy from instar's bundled skill files if they exist
+  const bundledDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous');
+
+  if (fs.existsSync(bundledDir)) {
+    // Copy from bundled source
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.mkdirSync(scriptsDir, { recursive: true });
+
+    const filesToCopy = [
+      { src: 'hooks/hooks.json', dst: path.join(hooksDir, 'hooks.json') },
+      { src: 'hooks/autonomous-stop-hook.sh', dst: path.join(hooksDir, 'autonomous-stop-hook.sh') },
+      { src: 'scripts/setup-autonomous.sh', dst: path.join(scriptsDir, 'setup-autonomous.sh') },
+      { src: 'skill.md', dst: path.join(autonomousDir, 'skill.md') },
+    ];
+
+    for (const { src, dst } of filesToCopy) {
+      const srcPath = path.join(bundledDir, src);
+      if (fs.existsSync(srcPath) && !fs.existsSync(dst)) {
+        fs.copyFileSync(srcPath, dst);
+        // Make shell scripts executable
+        if (dst.endsWith('.sh')) {
+          fs.chmodSync(dst, 0o755);
+        }
+      }
     }
   }
 }
@@ -4202,6 +4266,19 @@ function installClaudeSettings(projectDir: string, serverPort?: number): void {
   );
   if (!hasCheckpoint) {
     stopHooks.push({ matcher: '', hooks: [scopeCheckpointHook] });
+  }
+
+  // Register autonomous stop hook — structural enforcement for /autonomous mode.
+  // Must be FIRST in the Stop chain so it blocks exit before other hooks run.
+  const hasAutonomousHook = stopHooks.some(e =>
+    e.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
+  );
+  if (!hasAutonomousHook) {
+    (hooks.Stop as unknown[]).unshift({ matcher: '', hooks: [{
+      type: 'command',
+      command: 'bash .claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
+      timeout: 10000,
+    }] });
   }
 
   // PermissionRequest: auto-approve all — subagents don't inherit --dangerously-skip-permissions.

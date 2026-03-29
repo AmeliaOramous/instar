@@ -363,6 +363,14 @@ addCmd
   });
 
 addCmd
+  .command('slack')
+  .description('Add Slack messaging adapter (tokens entered interactively)')
+  .action(async () => {
+    const { addSlack } = await import('./commands/slack-cli.js');
+    return addSlack();
+  });
+
+addCmd
   .command('sentry')
   .description('Add Sentry error monitoring')
   .option('--dsn <dsn>', 'Sentry DSN')
@@ -373,6 +381,20 @@ addCmd
   .description('Add Claude API quota tracking')
   .option('--state-file <path>', 'Path to quota state file (default: .instar/state/quota.json)')
   .action((opts) => addQuota(opts));
+
+// ── Remove ──────────────────────────────────────────────────────
+
+const removeAdapterCmd = program
+  .command('remove')
+  .description('Remove capabilities from the agent');
+
+removeAdapterCmd
+  .command('slack')
+  .description('Remove Slack messaging adapter and purge associated data')
+  .action(async () => {
+    const { removeSlack } = await import('./commands/slack-cli.js');
+    return removeSlack();
+  });
 
 // ── Backup ───────────────────────────────────────────────────────
 
@@ -1131,6 +1153,16 @@ telemetryCmd
 
 // ── Server ────────────────────────────────────────────────────────
 
+/** Guard: prevent sessions from inadvertently starting/stopping/restarting the server. */
+function rejectIfInsideSession(action: string): boolean {
+  if (process.env.INSTAR_SESSION_ID) {
+    console.error(pc.red(`Cannot '${action}' from inside a session (session ${process.env.INSTAR_SESSION_ID}).`));
+    console.error(pc.dim('The server is managed by the supervisor. Sessions should not start, stop, or restart it.'));
+    return true;
+  }
+  return false;
+}
+
 const serverCmd = program
   .command('server')
   .description('Manage the persistent agent server');
@@ -1142,6 +1174,7 @@ serverCmd
   .option('--no-telegram', 'Skip Telegram polling (use when lifeline manages Telegram)')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (rejectIfInsideSession('server start')) return;
     if (name && !opts.dir) {
       // Resolve standalone agent name to directory
       const { resolveAgentDir } = await import('./core/Config.js');
@@ -1160,6 +1193,7 @@ serverCmd
   .description('Stop the agent server (optional: standalone agent name)')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (rejectIfInsideSession('server stop')) return;
     if (name && !opts.dir) {
       const { resolveAgentDir } = await import('./core/Config.js');
       try {
@@ -1177,6 +1211,7 @@ serverCmd
   .description('Restart the agent server (handles launchd/systemd lifecycle)')
   .option('-d, --dir <path>', 'Project directory')
   .action(async (name, opts) => {
+    if (rejectIfInsideSession('server restart')) return;
     if (name && !opts.dir) {
       const { resolveAgentDir } = await import('./core/Config.js');
       try {

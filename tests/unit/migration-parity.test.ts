@@ -110,5 +110,16 @@ describe('Migration Parity', () => {
       // (a known bug from earlier migration attempts)
       expect(migratorSource).toContain('${INSTAR_SERVER_URL}');
     });
+
+    it('autonomous stop hook is deployed and registered during migration', () => {
+      // Without this, /autonomous mode has no structural enforcement.
+      // Sessions would enter "autonomous mode" in name only — the stop hook
+      // that blocks exit and feeds tasks back would never fire.
+      expect(migratorSource).toContain('ensureAutonomousStopHook');
+      expect(migratorSource).toContain('autonomous-stop-hook');
+      // Must both deploy files AND register in settings.json
+      expect(migratorSource).toContain('autonomous-stop-hook.sh');
+      expect(migratorSource).toContain('hooks.Stop');
+    });
   });
 });

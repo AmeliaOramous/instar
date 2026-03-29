@@ -145,6 +145,12 @@ interface TelegramUpdate {
     };
     date: number;
   };
+  callback_query?: {
+    id: string;
+    from: { id: number; first_name: string; username?: string };
+    data?: string;
+    message?: { message_id: number; chat: { id: number } };
+  };
 }
 
 export class TelegramLifeline {
@@ -161,7 +167,8 @@ export class TelegramLifeline {
   private lifelineTopicId: number | null = null;
   private lockPath: string;
   private consecutive409s = 0;
-  private pollBackoffMs = 2000; // Grows on 409 errors
+  private consecutive429s = 0;
+  private pollBackoffMs = 2000; // Grows on 409/429 errors
 
   // Doctor session tracking (Crash Recovery UX)
   private activeDoctorSession: string | null = null;
@@ -367,7 +374,7 @@ export class TelegramLifeline {
       await this.apiCall('getUpdates', {
         offset: this.lastUpdateId + 1,
         timeout: 0,
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
       });
       console.log('[Lifeline] Stale connection flushed');
     } catch (err) {
@@ -386,7 +393,7 @@ export class TelegramLifeline {
             await this.apiCall('getUpdates', {
               offset: this.lastUpdateId + 1,
               timeout: 0,
-              allowed_updates: ['message'],
+              allowed_updates: ['message', 'callback_query'],
             });
             console.log(`[Lifeline] Stale connection flushed (retry ${i + 1} succeeded)`);
             return;
@@ -420,8 +427,9 @@ export class TelegramLifeline {
         // messages that were already processed.
         this.saveOffset();
       }
-      // Success — reset 409 backoff
+      // Success — reset backoff counters
       this.consecutive409s = 0;
+      this.consecutive429s = 0;
       this.pollBackoffMs = this.config.pollIntervalMs ?? 2000;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -438,6 +446,16 @@ export class TelegramLifeline {
         if (this.consecutive409s === 1 || this.consecutive409s % 10 === 0) {
           console.warn(`[Lifeline] Telegram 409 Conflict (${this.consecutive409s}x) — another bot instance is polling. Backing off to ${this.pollBackoffMs / 1000}s`);
         }
+      } else if (errMsg.includes('429') || errMsg.includes('rate limited')) {
+        // Handle 429 Too Many Requests — back off the poll loop itself
+        // The per-call retry in apiCall() handles individual requests, but if the
+        // rate limit persists across calls, the poll loop must also slow down.
+        this.consecutive429s++;
+        // Exponential backoff: 10s, 20s, 40s, 60s max
+        this.pollBackoffMs = Math.min(60_000, 5000 * Math.pow(2, this.consecutive429s));
+        if (this.consecutive429s === 1 || this.consecutive429s % 5 === 0) {
+          console.warn(`[Lifeline] Telegram 429 rate limit (${this.consecutive429s}x) — backing off poll to ${this.pollBackoffMs / 1000}s`);
+        }
       } else if (!errMsg.includes('abort')) {
         // Non-fatal error — continue polling
         console.error(`[Lifeline] Poll error: ${errMsg}`);
@@ -448,6 +466,13 @@ export class TelegramLifeline {
   }
 
   private async processUpdate(update: TelegramUpdate): Promise<void> {
+    // Forward callback queries (inline keyboard button presses) to the server
+    // These come from Prompt Gate relay buttons — the server handles the response injection
+    if (update.callback_query) {
+      await this.forwardCallbackQuery(update.callback_query);
+      return;
+    }
+
     const msg = update.message;
     if (!msg) return;
 
@@ -692,6 +717,57 @@ export class TelegramLifeline {
           `Server is temporarily down. Your file has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
         );
       }
+    }
+  }
+
+  /**
+   * Forward an inline keyboard callback query to the server for processing.
+   * Prompt Gate relay buttons generate these when the user taps a button.
+   */
+  private async forwardCallbackQuery(query: NonNullable<TelegramUpdate['callback_query']>): Promise<void> {
+    if (!this.supervisor.healthy) {
+      // Server is down — can't process the callback. Answer with error.
+      await this.apiCall('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: 'Server is restarting — please try again in a moment.',
+      }).catch(() => {});
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${this.projectConfig.port}/internal/telegram-callback`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              callbackQueryId: query.id,
+              data: query.data,
+              fromUserId: query.from.id,
+              fromUsername: query.from.username,
+              messageId: query.message?.message_id,
+              chatId: query.message?.chat?.id,
+            }),
+            signal: controller.signal,
+          }
+        );
+        if (!response.ok) {
+          await this.apiCall('answerCallbackQuery', {
+            callback_query_id: query.id,
+            text: 'Failed to process — please try again.',
+          }).catch(() => {});
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      await this.apiCall('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: 'Server unreachable.',
+      }).catch(() => {});
     }
   }
 
@@ -1603,7 +1679,7 @@ export class TelegramLifeline {
     const result = await this.apiCall('getUpdates', {
       offset: this.lastUpdateId + 1,
       timeout: 30,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
     });
     return (result as TelegramUpdate[]) ?? [];
   }

@@ -182,6 +182,28 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(settings.hooks.PreToolUse).toBeDefined();
   });
 
+  it('registers autonomous stop hook in settings.json', () => {
+    const settingsPath = path.join(projectDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+    const stopHooks = settings.hooks?.Stop as Array<{ hooks?: Array<{ command?: string }> }>;
+    expect(stopHooks).toBeDefined();
+
+    const hasAutonomousHook = stopHooks.some(entry =>
+      entry.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
+    );
+    expect(hasAutonomousHook).toBe(true);
+  });
+
+  it('installs autonomous skill with hooks directory', () => {
+    const hookScript = path.join(projectDir, '.claude', 'skills', 'autonomous', 'hooks', 'autonomous-stop-hook.sh');
+    expect(fs.existsSync(hookScript)).toBe(true);
+
+    // Must be executable
+    const stats = fs.statSync(hookScript);
+    expect(stats.mode & 0o111).toBeGreaterThan(0);
+  });
+
   it('creates .claude/scripts/health-watchdog.sh', () => {
     const watchdogPath = path.join(projectDir, '.claude', 'scripts', 'health-watchdog.sh');
     expect(fs.existsSync(watchdogPath)).toBe(true);

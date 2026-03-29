@@ -134,6 +134,7 @@ export interface RouteContext {
   trustElevationTracker: TrustElevationTracker | null;
   autonomousEvolution: AutonomousEvolution | null;
   whatsapp: import('../messaging/WhatsAppAdapter.js').WhatsAppAdapter | null;
+  slack: import('../messaging/slack/SlackAdapter.js').SlackAdapter | null;
   messageBridge: import('../messaging/shared/MessageBridge.js').MessageBridge | null;
   hookEventReceiver: HookEventReceiver | null;
   worktreeMonitor: WorktreeMonitor | null;
@@ -2324,24 +2325,50 @@ export function createRoutes(ctx: RouteContext): Router {
       ? ctx.state.listSessions({ status: status as 'starting' | 'running' | 'completed' | 'failed' | 'killed' })
       : ctx.state.listSessions();
 
-    // Enrich sessions with hook event telemetry when available
-    const enriched = req.query.enrich !== 'false' && ctx.hookEventReceiver
-      ? sessions.map(s => {
-          const summary = ctx.hookEventReceiver!.getSessionSummary(s.tmuxSession);
-          if (!summary) return s;
-          return {
-            ...s,
-            telemetry: {
-              eventCount: summary.eventCount,
-              toolsUsed: summary.toolsUsed,
-              subagentsSpawned: summary.subagentsSpawned,
-              lastActivity: summary.lastEvent,
-              taskCompleted: ctx.hookEventReceiver!.hasTaskCompleted(s.tmuxSession),
-              exitReason: ctx.hookEventReceiver!.getExitReason(s.tmuxSession),
-            },
+    // Enrich sessions with hook event telemetry and platform info
+    const enriched = sessions.map(s => {
+      const result: Record<string, unknown> = { ...s };
+
+      // Add hook event telemetry
+      if (req.query.enrich !== 'false' && ctx.hookEventReceiver) {
+        const summary = ctx.hookEventReceiver.getSessionSummary(s.tmuxSession);
+        if (summary) {
+          result.telemetry = {
+            eventCount: summary.eventCount,
+            toolsUsed: summary.toolsUsed,
+            subagentsSpawned: summary.subagentsSpawned,
+            lastActivity: summary.lastEvent,
+            taskCompleted: ctx.hookEventReceiver!.hasTaskCompleted(s.tmuxSession),
+            exitReason: ctx.hookEventReceiver!.getExitReason(s.tmuxSession),
           };
-        })
-      : sessions;
+        }
+      }
+
+      // Add platform indicator and display name
+      if (ctx.telegram) {
+        const topicId = ctx.telegram.getTopicForSession?.(s.tmuxSession);
+        if (topicId) {
+          result.platform = 'telegram';
+          result.platformId = topicId;
+          const topicName = ctx.telegram.getTopicName?.(topicId);
+          if (topicName) result.platformName = topicName;
+        }
+      }
+      if (!result.platform && ctx.slack) {
+        const channelId = ctx.slack.getChannelForSession(s.tmuxSession);
+        if (channelId) {
+          result.platform = 'slack';
+          result.platformId = channelId;
+          const registry = ctx.slack.getChannelRegistry();
+          if (registry[channelId]?.channelName) result.platformName = registry[channelId].channelName;
+        }
+      }
+      if (!result.platform) {
+        result.platform = 'headless';
+      }
+
+      return result;
+    });
 
     res.json(enriched);
   });
@@ -2455,9 +2482,10 @@ export function createRoutes(ctx: RouteContext): Router {
   });
 
   // Create an interactive session from the dashboard.
-  // By default creates a Telegram topic; set headless=true to skip.
+  // Set platform to 'telegram', 'slack', or 'headless'.
+  // Legacy: headless=true is equivalent to platform='headless'.
   router.post('/sessions/create', spawnLimiter, async (req, res) => {
-    const { name, headless } = req.body;
+    const { name, headless, platform } = req.body;
 
     if (!name || typeof name !== 'string' || name.trim().length < 1) {
       res.status(400).json({ error: '"name" is required (non-empty string)' });
@@ -2470,15 +2498,28 @@ export function createRoutes(ctx: RouteContext): Router {
 
     const topicName = name.trim();
     let topicId: number | undefined;
+    let slackChannelId: string | undefined;
+    const resolvedPlatform = platform || (headless ? 'headless' : (ctx.telegram ? 'telegram' : (ctx.slack ? 'slack' : 'headless')));
 
-    // Create Telegram topic unless headless
-    if (!headless && ctx.telegram) {
+    // Create Telegram topic
+    if (resolvedPlatform === 'telegram' && ctx.telegram) {
       try {
         const topic = await ctx.telegram.findOrCreateForumTopic(topicName);
         topicId = topic.topicId;
       } catch (err) {
-        // Non-fatal: fall back to headless if topic creation fails
         console.error(`[sessions/create] Telegram topic creation failed, proceeding headless: ${err}`);
+      }
+    }
+
+    // Create Slack channel
+    if (resolvedPlatform === 'slack' && ctx.slack) {
+      try {
+        const rawAgentName = (ctx.slack as unknown as { config: { workspaceName?: string } }).config?.workspaceName?.replace(/-agent$/i, '') || 'agent';
+        const agentName = rawAgentName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        const channelName = `${agentName}-sess-${topicName.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40)}`;
+        slackChannelId = await ctx.slack.createChannel(channelName);
+      } catch (err) {
+        console.error(`[sessions/create] Slack channel creation failed, proceeding headless: ${err}`);
       }
     }
 
@@ -2489,7 +2530,7 @@ export function createRoutes(ctx: RouteContext): Router {
         topicId ? { telegramTopicId: topicId } : undefined,
       );
 
-      // Update topic-session registry if we created a topic
+      // Update topic-session registry if we created a Telegram topic
       if (topicId) {
         const registryPath = path.join(ctx.config.stateDir, 'topic-session-registry.json');
         try {
@@ -2504,12 +2545,27 @@ export function createRoutes(ctx: RouteContext): Router {
         }
       }
 
+      // Update Slack channel-session registry and invite authorized users
+      if (slackChannelId && ctx.slack) {
+        ctx.slack.registerChannelSession(slackChannelId, tmuxSession, topicName);
+        // Invite authorized users to the new channel
+        try {
+          const slackConfig = ctx.config.messaging?.find(m => m.type === 'slack')?.config as Record<string, unknown> | undefined;
+          const authorizedUserIds = (slackConfig?.authorizedUserIds as string[]) ?? [];
+          for (const userId of authorizedUserIds) {
+            await ctx.slack.api.call('conversations.invite', { channel: slackChannelId, users: userId }).catch(() => {});
+          }
+        } catch { /* non-fatal */ }
+      }
+
       res.status(201).json({
         ok: true,
         session: tmuxSession,
         name: topicName,
         topicId: topicId || null,
-        headless: !topicId,
+        slackChannelId: slackChannelId || null,
+        platform: resolvedPlatform,
+        headless: resolvedPlatform === 'headless',
       });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -3103,7 +3159,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const { name, color } = req.body;
+    const { name, color, firstMessage } = req.body;
     if (!name || typeof name !== 'string' || name.trim().length < 1) {
       res.status(400).json({ error: '"name" is required (non-empty string)' });
       return;
@@ -3112,16 +3168,32 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"name" must be 128 characters or fewer' });
       return;
     }
+    if (firstMessage !== undefined && (typeof firstMessage !== 'string' || firstMessage.length > 4096)) {
+      res.status(400).json({ error: '"firstMessage" must be a string of 4096 characters or fewer' });
+      return;
+    }
 
     // Color is optional — defaults to green (9367192)
     const iconColor = typeof color === 'number' ? color : 9367192;
 
     try {
-      const topic = await ctx.telegram.createForumTopic(name.trim(), iconColor);
-      res.status(201).json({
+      const topic = await ctx.telegram.findOrCreateForumTopic(name.trim(), iconColor);
+
+      // Send initial message if provided — goes through sendToTopic so it's
+      // properly logged to JSONL + TopicMemory. This ensures new sessions
+      // spawned in this topic will see the context in their thread history.
+      let messageSent = false;
+      if (firstMessage && !topic.reused) {
+        await ctx.telegram.sendToTopic(topic.topicId, firstMessage);
+        messageSent = true;
+      }
+
+      res.status(topic.reused ? 200 : 201).json({
         topicId: topic.topicId,
         name: name.trim(),
-        created: true,
+        created: !topic.reused,
+        reused: topic.reused,
+        messageSent,
       });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -3139,7 +3211,7 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: 'topicId must be a number' });
       return;
     }
-    const { text } = req.body;
+    const { text, metadata } = req.body;
     if (!text || typeof text !== 'string') {
       res.status(400).json({ error: '"text" field required' });
       return;
@@ -3150,9 +3222,13 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     try {
-      await ctx.telegram.sendToTopic(topicId, text);
-      // Clear injection tracker — the agent has responded to this topic
-      ctx.sessionManager.clearInjectionTracker(topicId);
+      const isProxy = metadata?.isProxy === true;
+      await ctx.telegram.sendToTopic(topicId, text, { skipStallClear: isProxy });
+      // Clear injection tracker — but NOT for proxy messages (PresenceProxy)
+      // Proxy messages should not reset stall detection timers
+      if (!isProxy) {
+        ctx.sessionManager.clearInjectionTracker(topicId);
+      }
       res.json({ ok: true, topicId });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -3210,6 +3286,142 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     res.json(ctx.telegram.getLogStats());
+  });
+
+  // ── Slack ──────────────────────────────────────────────────────
+
+  router.post('/slack/reply/:channelId', async (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    const { channelId } = req.params;
+    const { text, thread_ts } = req.body;
+    if (!text || typeof text !== 'string') {
+      res.status(400).json({ error: '"text" field required' });
+      return;
+    }
+
+    try {
+      const ts = await ctx.slack.sendToChannel(channelId, text, { thread_ts });
+
+      // Notify onMessageLogged that the agent responded (so PresenceProxy cancels standby)
+      if (ctx.slack.onMessageLogged) {
+        console.log(`[slack-reply] Firing onMessageLogged(fromUser:false) for channel ${channelId}`);
+        ctx.slack.onMessageLogged({
+          messageId: ts,
+          channelId,
+          text,
+          fromUser: false,
+          timestamp: new Date().toISOString(),
+          sessionName: null,
+          platform: 'slack',
+        });
+      } else {
+        console.warn(`[slack-reply] onMessageLogged not wired — standby won't cancel`);
+      }
+
+      res.json({ ok: true, topicId: channelId, ts });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/internal/slack-forward', async (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    const { channelId, text } = req.body;
+    if (!channelId || !text) {
+      res.status(400).json({ error: '"channelId" and "text" fields required' });
+      return;
+    }
+
+    try {
+      await ctx.slack.sendToChannel(channelId, text);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.get('/slack/channels', async (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    try {
+      const channels = await ctx.slack.api.call('conversations.list', {
+        types: 'public_channel,private_channel',
+        exclude_archived: req.query.include_archived !== 'true',
+        limit: 200,
+      });
+      res.json({ ok: true, channels: channels.channels ?? [] });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/slack/channels', async (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    const { name, is_private } = req.body;
+    if (!name || typeof name !== 'string') {
+      res.status(400).json({ error: '"name" field required' });
+      return;
+    }
+
+    try {
+      const channelId = await ctx.slack.createChannel(name, is_private);
+      res.json({ ok: true, channelId });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/slack/channels/:channelId/messages', (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    const { channelId } = req.params;
+    const limit = Math.min(parseInt(req.query.limit as string, 10) || 30, 100);
+
+    const messages = ctx.slack.getChannelMessages(channelId, limit);
+    res.json({ ok: true, messages, count: messages.length });
+  });
+
+  router.get('/slack/search', (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    const query = req.query.q as string | undefined;
+    const channelId = req.query.channelId as string | undefined;
+    const since = req.query.since ? new Date(req.query.since as string) : undefined;
+    const rawLimit = parseInt(req.query.limit as string, 10) || 50;
+    const limit = Math.min(Math.max(rawLimit, 1), 500);
+
+    const results = ctx.slack.searchLog({ query, channelId, since, limit });
+    res.json({ results, count: results.length });
+  });
+
+  router.get('/slack/log-stats', (req, res) => {
+    if (!ctx.slack) {
+      res.status(503).json({ error: 'Slack not configured' });
+      return;
+    }
+
+    res.json(ctx.slack.getLogStats());
   });
 
   // ── Attention Queue ─────────────────────────────────────────────
@@ -4644,6 +4856,13 @@ export function createRoutes(ctx: RouteContext): Router {
 
     const tunnelType = (ctx.config.tunnel?.type === 'named' ? 'named' : 'quick') as 'quick' | 'named';
 
+    // Named tunnels have permanent URLs — skip periodic refresh calls since
+    // the URL never changes. The initial broadcast on server startup is sufficient.
+    if (tunnelType === 'named') {
+      res.json({ action: 'skipped', reason: 'named tunnel — URL is permanent', url: tunnelUrl, tunnelType });
+      return;
+    }
+
     try {
       await ctx.telegram.broadcastDashboardUrl(tunnelUrl, tunnelType);
       res.json({ action: 'refreshed', url: tunnelUrl, tunnelType });
@@ -4883,6 +5102,117 @@ export function createRoutes(ctx: RouteContext): Router {
       }
     } else {
       res.status(503).json({ error: 'No message routing available' });
+    }
+  });
+
+  // ── Plan Prompt Relay (from hook) ─────────────────────────────
+  // Receives plan mode entry events from the PreToolUse hook on EnterPlanMode.
+  // Relays the plan to Telegram for user approval via inline keyboard.
+
+  router.post('/hooks/plan-prompt', async (req, res) => {
+    const { event, session_id, tool_input, instar_sid } = req.body;
+
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    console.log(`[PlanRelay] Received plan-prompt event: sid=${instar_sid} claude_sid=${session_id}`);
+
+    // Find the session and its topic binding
+    let topicId: number | undefined;
+    let tmuxSession: string | undefined;
+
+    // Strategy 1: look up by instar session ID or Claude session ID
+    const sessions = ctx.sessionManager.listRunningSessions();
+    const session = sessions.find(s =>
+      s.id === instar_sid || s.claudeSessionId === session_id
+    );
+    if (session) {
+      tmuxSession = session.tmuxSession;
+      topicId = ctx.telegram.getTopicForSession(session.tmuxSession) ?? undefined;
+    }
+
+    // Strategy 2: check all topic-session mappings for a match
+    if (!topicId && instar_sid) {
+      const allTopics = ctx.telegram.getAllTopicMappings?.() ?? [];
+      for (const mapping of allTopics) {
+        if (mapping.sessionName && (mapping.sessionName === instar_sid || instar_sid.includes(mapping.sessionName))) {
+          topicId = mapping.topicId;
+          tmuxSession = mapping.sessionName;
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: use the INSTAR_TELEGRAM_TOPIC env if the hook passed it
+    if (!topicId && req.body.telegram_topic) {
+      topicId = parseInt(req.body.telegram_topic, 10);
+    }
+
+    if (!topicId) {
+      console.log(`[PlanRelay] No topic binding found for sid=${instar_sid}`);
+      res.json({ ok: false, reason: 'no topic binding' });
+      return;
+    }
+
+    // Build a DetectedPrompt and relay it
+    try {
+      const prompt = {
+        type: 'plan' as const,
+        raw: '',
+        summary: 'Plan approval requested — the agent has a plan and is waiting for your decision.',
+        options: [
+          { key: '1', label: 'Yes, and bypass permissions' },
+          { key: '2', label: 'Yes, manually approve edits' },
+          { key: '3', label: 'Tell Claude what to change' },
+        ],
+        sessionName: tmuxSession || session?.tmuxSession || 'unknown',
+        detectedAt: Date.now(),
+        id: crypto.randomUUID().slice(0, 8),
+      };
+
+      await ctx.telegram.relayPrompt(topicId, prompt);
+      console.log(`[PlanRelay] Relayed plan prompt to topic ${topicId} for session ${tmuxSession || session?.tmuxSession}`);
+      res.json({ ok: true, topicId });
+    } catch (err) {
+      console.error(`[PlanRelay] Failed:`, err instanceof Error ? err.message : err);
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Telegram Callback Query Forwarding (from Lifeline) ────────
+  // Receives inline keyboard callback queries that the Lifeline forwarded.
+  // Processes them through TelegramAdapter.processCallbackQuery().
+
+  router.post('/internal/telegram-callback', async (req, res) => {
+    const { callbackQueryId, data, fromUserId, messageId, chatId } = req.body;
+
+    if (!callbackQueryId || !data) {
+      res.status(400).json({ error: 'callbackQueryId and data required' });
+      return;
+    }
+
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    try {
+      // Reconstruct a callback query object and process it through TelegramAdapter
+      const query = {
+        id: callbackQueryId,
+        data,
+        from: { id: fromUserId, is_bot: false, first_name: 'user' },
+        message: messageId ? { message_id: messageId, chat: { id: chatId } } : undefined,
+      };
+
+      // Use the adapter's public method for processing forwarded callbacks
+      await ctx.telegram.handleForwardedCallback(query);
+      res.json({ ok: true });
+    } catch (err) {
+      console.error(`[telegram-callback] Processing failed:`, err instanceof Error ? err.message : err);
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
@@ -5717,6 +6047,418 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Triage failed' });
     }
+  });
+
+  // ── Systems Dashboard (rich telemetry) ──────────────────────────
+  // Shared helper: safely extract data from a subsystem
+  function safeGet<T>(fn: () => T): T | null {
+    try { return fn(); } catch { return null; }
+  }
+
+  // Build capability telemetry for one capability
+  function buildCapabilityTelemetry(id: string): {
+    metric: string;
+    stats: Record<string, number | string | boolean | null>;
+    lastActivity: string | null;
+  } {
+    const stats: Record<string, number | string | boolean | null> = {};
+    let lastActivity: string | null = null;
+    let metric = 'Active';
+
+    try {
+      switch (id) {
+        case 'session-recovery': {
+          const ws = safeGet(() => ctx.watchdog?.getStats?.());
+          const ts = safeGet(() => ctx.triageNurse?.getStatus?.());
+          if (ws) {
+            stats.interventions = ws.interventionsTotal ?? 0;
+            stats.recoveries = ws.recoveries ?? 0;
+            stats.sessionDeaths = ws.sessionDeaths ?? 0;
+            stats.llmOverrides = ws.llmGateOverrides ?? 0;
+            metric = ws.interventionsTotal > 0
+              ? `${ws.recoveries} recovered · ${ws.interventionsTotal} interventions`
+              : 'No interventions needed';
+          }
+          if (ts) {
+            stats.activeCases = ts.activeCases ?? 0;
+            stats.totalTriages = ts.historyCount ?? 0;
+            stats.cooldowns = ts.cooldowns ?? 0;
+            if (ts.activeCases) metric += ` · ${ts.activeCases} active`;
+          }
+          if (!ws && !ts) metric = 'Standing by';
+          break;
+        }
+        case 'session-intelligence': {
+          stats.monitoring = true;
+          metric = 'Monitoring active sessions';
+          break;
+        }
+        case 'health-monitoring': {
+          const cr = safeGet(() => ctx.coherenceMonitor?.getLastReport?.()) as { passed?: number; failed?: number; corrected?: number; timestamp?: string } | null;
+          const sr = safeGet(() => ctx.systemReviewer?.getHealthStatus?.()) as { status?: string; message?: string; lastCheck?: string } | null;
+          const mp = safeGet(() => ctx.memoryMonitor?.getState?.()) as { pressurePercent?: number; state?: string; freeGB?: number; totalGB?: number; trend?: string; lastChecked?: string } | null;
+          const op = safeGet(() => ctx.orphanReaper?.getLastReport?.()) as { tracked?: unknown[]; orphans?: unknown[]; totalMemoryMB?: number; timestamp?: string } | null;
+          const parts: string[] = [];
+          if (cr) {
+            stats.coherenceChecks = (cr.passed ?? 0) + (cr.failed ?? 0);
+            stats.coherencePassed = cr.passed ?? 0;
+            stats.coherenceFailed = cr.failed ?? 0;
+            stats.coherenceCorrected = cr.corrected ?? 0;
+            if (cr.timestamp) lastActivity = cr.timestamp;
+            parts.push(cr.failed ? `${cr.failed} failing` : `${cr.passed ?? 0} checks passed`);
+          }
+          if (sr) {
+            stats.reviewStatus = sr.status ?? 'unknown';
+            if (sr.lastCheck) lastActivity = sr.lastCheck;
+            if (sr.message) parts.push(sr.message);
+          }
+          if (mp) {
+            stats.memoryPercent = Math.round(mp.pressurePercent ?? 0);
+            stats.memoryState = mp.state ?? 'unknown';
+            stats.memoryFreeGB = Math.round((mp.freeGB ?? 0) * 10) / 10;
+            stats.memoryTotalGB = Math.round((mp.totalGB ?? 0) * 10) / 10;
+            stats.memoryTrend = mp.trend ?? 'stable';
+            if (mp.lastChecked) lastActivity = mp.lastChecked;
+            parts.push(`Memory ${Math.round(mp.pressurePercent ?? 0)}%`);
+          }
+          if (op) {
+            stats.trackedProcesses = Array.isArray(op.tracked) ? op.tracked.length : 0;
+            stats.orphanProcesses = Array.isArray(op.orphans) ? op.orphans.length : 0;
+            stats.totalMemoryMB = Math.round(op.totalMemoryMB ?? 0);
+          }
+          metric = parts.join(' · ') || 'All checks passing';
+          break;
+        }
+        case 'safety-trust': { stats.gatesActive = true; metric = 'All gates active'; break; }
+        case 'coherence': {
+          const cr = safeGet(() => ctx.coherenceMonitor?.getHealth?.()) as { status?: string; lastCheck?: string } | null;
+          if (cr?.lastCheck) lastActivity = cr.lastCheck;
+          metric = 'Monitoring project integrity';
+          break;
+        }
+        case 'scheduled-jobs': {
+          const js = safeGet(() => ctx.scheduler?.getStatus?.());
+          if (js) {
+            stats.totalJobs = js.jobCount ?? 0;
+            stats.enabledJobs = js.enabledJobs ?? 0;
+            stats.queueLength = js.queueLength ?? 0;
+            stats.activeJobSessions = js.activeJobSessions ?? 0;
+            const parts = [`${js.enabledJobs} jobs enabled`];
+            if (js.activeJobSessions > 0) parts.push(`${js.activeJobSessions} running`);
+            if (js.queueLength > 0) parts.push(`${js.queueLength} queued`);
+            metric = parts.join(' · ');
+          }
+          break;
+        }
+        case 'quota': {
+          const qs = safeGet(() => ctx.quotaTracker?.getState?.());
+          if (qs) {
+            stats.weeklyUsage = Math.round(qs.usagePercent ?? 0);
+            stats.fiveHourRate = qs.fiveHourPercent != null ? Math.round(qs.fiveHourPercent) : null;
+            stats.recommendation = qs.recommendation ?? 'normal';
+            if (qs.lastUpdated) lastActivity = qs.lastUpdated;
+            const parts = [`Weekly usage ${Math.round(qs.usagePercent)}%`];
+            if (qs.fiveHourPercent != null) parts.push(`5h rate ${Math.round(qs.fiveHourPercent)}%`);
+            metric = parts.join(' · ');
+          }
+          break;
+        }
+        case 'telegram': {
+          const ts = safeGet(() => ctx.telegram?.getStatus?.());
+          const ls = safeGet(() => ctx.telegram?.getLogStats?.());
+          if (ts) {
+            stats.connected = ts.started ?? false;
+            stats.uptimeMs = ts.uptime ?? 0;
+            stats.topicMappings = ts.topicMappings ?? 0;
+            stats.pendingStalls = ts.pendingStalls ?? 0;
+            const parts: string[] = [];
+            if (ts.uptime) {
+              const hrs = Math.floor(ts.uptime / 3600000);
+              const mins = Math.floor((ts.uptime % 3600000) / 60000);
+              parts.push(`Connected ${hrs > 0 ? hrs + 'h ' : ''}${mins}m`);
+            }
+            if (ts.topicMappings > 0) parts.push(`${ts.topicMappings} topics`);
+            metric = parts.join(' · ') || 'Connected';
+          }
+          if (ls) { stats.totalMessages = ls.totalMessages ?? 0; }
+          break;
+        }
+        case 'whatsapp': { metric = 'Connected'; break; }
+        case 'slack': { metric = 'Connected'; break; }
+        case 'message-routing': { metric = 'Routing active'; break; }
+        case 'memory': { metric = 'Context assembly active'; break; }
+        case 'evolution': {
+          const ed = safeGet(() => ctx.evolution?.getDashboard?.()) as {
+            evolution?: { totalProposals?: number }; learnings?: { totalLearnings?: number; applied?: number };
+            gaps?: { totalGaps?: number }; actions?: { totalActions?: number; overdue?: number };
+          } | null;
+          if (ed) {
+            stats.proposals = ed.evolution?.totalProposals ?? 0;
+            stats.learnings = ed.learnings?.totalLearnings ?? 0;
+            stats.learningsApplied = ed.learnings?.applied ?? 0;
+            stats.gaps = ed.gaps?.totalGaps ?? 0;
+            stats.actions = ed.actions?.totalActions ?? 0;
+            stats.overdueActions = ed.actions?.overdue ?? 0;
+            const parts: string[] = [];
+            if (ed.evolution?.totalProposals) parts.push(`${ed.evolution.totalProposals} proposals`);
+            if (ed.gaps?.totalGaps) parts.push(`${ed.gaps.totalGaps} gaps`);
+            if (ed.learnings?.applied) parts.push(`${ed.learnings.applied} applied`);
+            metric = parts.join(' · ') || 'Monitoring capabilities';
+          }
+          break;
+        }
+        case 'infrastructure': {
+          const tunnelUrl = safeGet(() => ctx.tunnel?.getExternalUrl?.('/'));
+          stats.tunnelActive = !!tunnelUrl;
+          metric = tunnelUrl ? 'Tunnel active' : 'Running';
+          break;
+        }
+      }
+    } catch { /* fallback */ }
+
+    return { metric, stats, lastActivity };
+  }
+
+  router.get('/systems/status', (_req, res) => {
+    const uptimeMs = Date.now() - ctx.startTime.getTime();
+
+    // ── Capability metadata: maps internal subsystems to user-friendly labels ──
+    interface CapabilityDef {
+      id: string;
+      label: string;
+      description: string;
+      processes: { name: string; subsystem: unknown; statusFn?: () => unknown }[];
+    }
+
+    const capabilityDefs: CapabilityDef[] = [
+      {
+        id: 'session-recovery',
+        label: 'Session Recovery',
+        description: 'Detects stuck or crashed sessions and automatically recovers them. Uses a 4-layer stack: watchdog catches stuck commands, mechanical recovery fixes JSONL issues, heuristics handle 90% of remaining cases, and LLM diagnosis covers the rest.',
+        processes: [
+          { name: 'SessionWatchdog', subsystem: ctx.watchdog, statusFn: () => ctx.watchdog?.getStatus() },
+          { name: 'StallTriageNurse', subsystem: ctx.triageNurse, statusFn: () => ctx.triageNurse?.getStatus() },
+          { name: 'SpawnRequestManager', subsystem: ctx.spawnManager },
+        ],
+      },
+      {
+        id: 'session-intelligence',
+        label: 'Session Intelligence',
+        description: 'Monitors session activity and generates summaries for smart message routing. Captures terminal output every 60 seconds to enable intelligent routing of incoming messages to the most relevant session.',
+        processes: [
+          { name: 'SessionActivitySentinel', subsystem: ctx.activitySentinel },
+          { name: 'SessionSummarySentinel', subsystem: ctx.summarySentinel },
+        ],
+      },
+      {
+        id: 'health-monitoring',
+        label: 'Health Monitoring',
+        description: 'Continuous self-checks across config drift, resource pressure, system integrity, and functional probes. Runs coherence checks every 5 minutes and deep system reviews every 6 hours.',
+        processes: [
+          { name: 'CoherenceMonitor', subsystem: ctx.coherenceMonitor, statusFn: () => ctx.coherenceMonitor?.getLastReport() },
+          { name: 'SystemReviewer', subsystem: ctx.systemReviewer, statusFn: () => ctx.systemReviewer?.getHealthStatus() },
+          { name: 'MemoryPressureMonitor', subsystem: ctx.memoryMonitor, statusFn: () => ctx.memoryMonitor?.getState() },
+          { name: 'OrphanProcessReaper', subsystem: ctx.orphanReaper, statusFn: () => ctx.orphanReaper?.getLastReport() },
+        ],
+      },
+      {
+        id: 'safety-trust',
+        label: 'Safety & Trust',
+        description: 'Gates external operations by risk level, validates inbound messages against injection patterns, and manages adaptive trust levels per service.',
+        processes: [
+          { name: 'ExternalOperationGate', subsystem: ctx.operationGate },
+          { name: 'MessageSentinel', subsystem: ctx.sentinel },
+          { name: 'AdaptiveTrust', subsystem: ctx.adaptiveTrust },
+          { name: 'AutonomyManager', subsystem: ctx.autonomyManager },
+        ],
+      },
+      {
+        id: 'coherence',
+        label: 'Coherence & Integrity',
+        description: 'Ensures project state, scope boundaries, and response quality remain consistent. Prevents cross-project contamination and validates agent instructions are properly loaded.',
+        processes: [
+          { name: 'CoherenceGate', subsystem: ctx.coherenceGate },
+          { name: 'ResponseReviewGate', subsystem: ctx.responseReviewGate },
+          { name: 'CanonicalState', subsystem: ctx.canonicalState },
+          { name: 'InstructionsVerifier', subsystem: ctx.instructionsVerifier },
+        ],
+      },
+      {
+        id: 'scheduled-jobs',
+        label: 'Scheduled Jobs',
+        description: 'Runs tasks on cron schedules with priority-based queuing. Also tracks behavioral commitments the agent made to the user.',
+        processes: [
+          { name: 'JobScheduler', subsystem: ctx.scheduler },
+          { name: 'CommitmentTracker', subsystem: ctx.commitmentTracker, statusFn: () => ({ active: ctx.commitmentTracker?.getActive().length ?? 0 }) },
+        ],
+      },
+      {
+        id: 'quota',
+        label: 'Quota Management',
+        description: 'Tracks Claude API token usage in real-time. Sends warnings when approaching limits, enforces quotas, and auto-switches between accounts if configured.',
+        processes: [
+          { name: 'QuotaTracker', subsystem: ctx.quotaTracker, statusFn: () => ctx.quotaTracker?.getState() },
+          { name: 'QuotaManager', subsystem: ctx.quotaManager },
+        ],
+      },
+      {
+        id: 'telegram',
+        label: 'Telegram',
+        description: 'Full Telegram messaging integration with long-polling, topic-based session routing, notification batching, and delivery retry.',
+        processes: [
+          { name: 'TelegramAdapter', subsystem: ctx.telegram },
+        ],
+      },
+      {
+        id: 'whatsapp',
+        label: 'WhatsApp',
+        description: 'Sends and receives messages through WhatsApp',
+        processes: [
+          { name: 'WhatsAppAdapter', subsystem: ctx.whatsapp },
+        ],
+      },
+      {
+        id: 'slack',
+        label: 'Slack',
+        description: 'Sends and receives messages through Slack',
+        processes: [
+          { name: 'SlackAdapter', subsystem: ctx.slack },
+        ],
+      },
+      {
+        id: 'message-routing',
+        label: 'Message Routing',
+        description: 'Routes messages between platforms and sessions intelligently. Handles cross-platform bridging and inter-agent delivery with retry and dead-letter archiving.',
+        processes: [
+          { name: 'MessageBridge', subsystem: ctx.messageBridge },
+          { name: 'MessageRouter', subsystem: ctx.messageRouter },
+        ],
+      },
+      {
+        id: 'memory',
+        label: 'Memory & Context',
+        description: 'Topic memory stores conversation history per topic. Semantic memory enables natural language search. Working memory assembles relevant context for each session.',
+        processes: [
+          { name: 'TopicMemory', subsystem: ctx.topicMemory },
+          { name: 'SemanticMemory', subsystem: ctx.semanticMemory },
+          { name: 'WorkingMemoryAssembler', subsystem: ctx.workingMemory },
+          { name: 'SelfKnowledgeTree', subsystem: ctx.selfKnowledgeTree },
+        ],
+      },
+      {
+        id: 'evolution',
+        label: 'Self-Improvement',
+        description: 'Detects capability gaps, generates improvement proposals, tracks learnings, and implements approved changes. The self-improvement loop.',
+        processes: [
+          { name: 'EvolutionManager', subsystem: ctx.evolution },
+          { name: 'AutonomousEvolution', subsystem: ctx.autonomousEvolution },
+          { name: 'CapabilityMapper', subsystem: ctx.capabilityMapper },
+          { name: 'CoverageAuditor', subsystem: ctx.coverageAuditor },
+        ],
+      },
+      {
+        id: 'infrastructure',
+        label: 'Infrastructure',
+        description: 'Cloudflare tunnel for remote access, git worktree management for isolated agent work, and the Threadline agent network.',
+        processes: [
+          { name: 'TunnelManager', subsystem: ctx.tunnel },
+          { name: 'WorktreeMonitor', subsystem: ctx.worktreeMonitor },
+          { name: 'ThreadlineRouter', subsystem: ctx.threadlineRouter },
+        ],
+      },
+    ];
+
+    // Build active capabilities with full telemetry
+    interface ActiveCapability {
+      id: string;
+      label: string;
+      description: string;
+      status: 'active' | 'error';
+      metric: string;
+      stats: Record<string, number | string | boolean | null>;
+      lastActivity: string | null;
+      processes: { name: string; status: 'running' | 'error'; details?: unknown }[];
+    }
+
+    interface Issue {
+      severity: 'error' | 'warning';
+      label: string;
+      description: string;
+      capability: string;
+      process: string;
+    }
+
+    const activeCapabilities: ActiveCapability[] = [];
+    const issues: Issue[] = [];
+
+    for (const def of capabilityDefs) {
+      const configuredProcesses = def.processes.filter(p => p.subsystem != null);
+      if (configuredProcesses.length === 0) continue;
+
+      const processResults: { name: string; status: 'running' | 'error'; details?: unknown }[] = [];
+      let hasError = false;
+
+      for (const p of configuredProcesses) {
+        try {
+          const details = p.statusFn ? p.statusFn() : undefined;
+          processResults.push({ name: p.name, status: 'running', details });
+        } catch {
+          processResults.push({ name: p.name, status: 'error' });
+          hasError = true;
+          issues.push({
+            severity: 'error',
+            label: `${def.label} issue`,
+            description: `${p.name} encountered an error`,
+            capability: def.id,
+            process: p.name,
+          });
+        }
+      }
+
+      const telemetry = buildCapabilityTelemetry(def.id);
+
+      activeCapabilities.push({
+        id: def.id,
+        label: def.label,
+        description: def.description,
+        status: hasError ? 'error' : 'active',
+        metric: telemetry.metric,
+        stats: telemetry.stats,
+        lastActivity: telemetry.lastActivity,
+        processes: processResults,
+      });
+    }
+
+    // Determine overall health
+    const errorCount = issues.filter(i => i.severity === 'error').length;
+    const health = errorCount > 0 ? 'error' as const : 'healthy' as const;
+    const healthSummary = health === 'healthy'
+      ? 'All systems operational'
+      : `${errorCount} issue${errorCount > 1 ? 's' : ''} need${errorCount === 1 ? 's' : ''} attention`;
+
+    // Recent degradation events
+    const allEvents = DegradationReporter.getInstance().getEvents();
+    const recentEvents = allEvents.slice(-20).reverse().map(e => ({
+      ...e,
+      narrative: DegradationReporter.narrativeFor(e),
+    }));
+
+    res.json({
+      uptime: uptimeMs,
+      health,
+      healthSummary,
+      activeCapabilities,
+      issues,
+      recentEvents,
+    });
+  });
+
+  // Detail endpoint for a single capability
+  router.get('/systems/capability/:id', (req, res) => {
+    const capId = req.params.id;
+    const telemetry = buildCapabilityTelemetry(capId);
+    const uptimeMs = Date.now() - ctx.startTime.getTime();
+    res.json({ id: capId, uptime: uptimeMs, ...telemetry });
   });
 
   // ── External Operation Safety ────────────────────────────────────

@@ -64,6 +64,24 @@ const IDLE_PROMPT_PATTERNS = [
 ];
 
 /**
+ * Patterns in terminal output that indicate an API or tool error caused the session to stop.
+ * When detected at the idle prompt, we nudge the session to continue instead of killing it.
+ */
+const TERMINAL_ERROR_PATTERNS = [
+  'API Error:',
+  'invalid_request_error',
+  'Could not process',
+  'overloaded_error',
+  'rate_limit_error',
+  'Request timed out',
+  'Internal server error',
+  'ServiceUnavailable',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'fetch failed',
+];
+
+/**
  * Process names that are always running in a Claude Code session (MCP servers, etc.)
  * These do NOT indicate activity — they're background infrastructure.
  */
@@ -113,6 +131,11 @@ export class SessionManager extends EventEmitter {
    *  Key = tmuxSession name. Cleared when agent replies via /telegram/reply/:topicId. */
   private pendingInjections = new Map<string, { topicId: number; injectedAt: number; text: string }>();
 
+  /** Track sessions that have been nudged after an API error.
+   *  Key = session ID. Prevents infinite nudge loops — each session gets ONE nudge.
+   *  If it goes idle again after the nudge, the zombie detector kills it normally. */
+  private errorNudgedSessions = new Set<string>();
+
   /** Cached count of running sessions, updated asynchronously by the monitor tick.
    *  Used by the health endpoint to avoid synchronous tmux polling. */
   private _cachedRunningCount = 0;
@@ -152,6 +175,7 @@ export class SessionManager extends EventEmitter {
     this.on('sessionComplete', (session: Session) => {
       detector.cleanup(session.tmuxSession);
       this.relayLeases.delete(session.id);
+      this.errorNudgedSessions.delete(session.id);
     });
   }
 
@@ -345,6 +369,23 @@ export class SessionManager extends EventEmitter {
             const now = Date.now();
             if (!this.idlePromptSince.has(session.id)) {
               this.idlePromptSince.set(session.id, now);
+
+              // ── Error nudge: on first idle detection, check terminal for API errors ──
+              // If the session went idle because of an API error (not a natural stop),
+              // inject a nudge to get it working again instead of waiting 15m to kill.
+              if (!this.errorNudgedSessions.has(session.id)) {
+                const recentOutput = this.captureOutput(session.tmuxSession, 30);
+                if (recentOutput) {
+                  const hasError = TERMINAL_ERROR_PATTERNS.some(p => recentOutput.includes(p));
+                  if (hasError) {
+                    this.errorNudgedSessions.add(session.id);
+                    console.log(`[SessionManager] Session "${session.name}" idle after API error — nudging to continue.`);
+                    this.sendInput(session.tmuxSession, 'You hit an API error. Please continue your work — skip or work around the action that failed.');
+                    this.idlePromptSince.delete(session.id); // Reset idle timer
+                    continue; // Skip to next session
+                  }
+                }
+              }
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
               if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
@@ -1488,7 +1529,7 @@ export class SessionManager extends EventEmitter {
    * Wait for Claude to be ready in a tmux session by polling output.
    * Looks for Claude Code's prompt character (❯) which appears when ready for input.
    */
-  private async waitForClaudeReady(tmuxSession: string, timeoutMs: number = 30000): Promise<boolean> {
+  async waitForClaudeReady(tmuxSession: string, timeoutMs: number = 30000): Promise<boolean> {
     const start = Date.now();
     // Wait a minimum startup delay before checking (Claude needs time to load)
     await new Promise(r => setTimeout(r, 3000));
