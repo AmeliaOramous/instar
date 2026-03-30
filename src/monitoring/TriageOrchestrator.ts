@@ -562,7 +562,7 @@ export class TriageOrchestrator extends EventEmitter {
     if (output) {
       const lines = output.split('\n').filter(l => l.trim());
       const tail = lines.slice(-3).join('\n');
-      if ((tail.includes('❯') || tail.includes('bypass permissions')) && evidence.pendingMessage) {
+      if ((tail.includes('❯') || tail.includes('bypass permissions') || tail.includes('INSTAR_CODEX_READY')) && evidence.pendingMessage) {
         return {
           classification: 'message_lost',
           confidence: 0.95,
@@ -798,7 +798,7 @@ export class TriageOrchestrator extends EventEmitter {
       // Check if session has finished (prompt visible)
       const lines = output.split('\n').filter(l => l.trim());
       const tail = lines.slice(-3).join('\n');
-      if (tail.includes('❯') && output !== lastOutput && output.length > lastOutput.length) {
+      if ((tail.includes('❯') || tail.includes('INSTAR_CODEX_READY')) && output !== lastOutput && output.length > lastOutput.length) {
         // Session is at prompt — it's done outputting
         this.deps.killTriageSession(tmuxName);
         return output;

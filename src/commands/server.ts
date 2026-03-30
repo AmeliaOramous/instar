@@ -23,6 +23,8 @@ import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
+import { CodexCliIntelligenceProvider } from '../core/CodexCliIntelligenceProvider.js';
+import { CopilotCliIntelligenceProvider } from '../core/CopilotCliIntelligenceProvider.js';
 import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
@@ -99,7 +101,7 @@ import { createPlatformProbes } from '../monitoring/probes/PlatformProbe.js';
 import { bootstrapThreadline } from '../threadline/ThreadlineBootstrap.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
-import type { Message, IntelligenceProvider, UserProfile, InstarConfig } from '../core/types.js';
+import type { Message, IntelligenceProvider, UserProfile, InstarConfig, SessionRuntime } from '../core/types.js';
 import { UserManager } from '../users/UserManager.js';
 import { formatUserContextForSession, hasUserContext } from '../users/UserContextBuilder.js';
 import type { OrphanProcessReaper } from '../monitoring/OrphanProcessReaper.js';
@@ -307,6 +309,46 @@ let _projectDir: string = process.cwd();
 let _sharedIntelligence: import('../core/types.js').IntelligenceProvider | null = null;
 let _selfKnowledgeTree: SelfKnowledgeTree | null = null;
 let _slackAdapter: import('../messaging/slack/SlackAdapter.js').SlackAdapter | null = null;
+
+type ResumeAwareSession = {
+  claudeSessionId?: string;
+  runtimeSessionId?: string;
+  runtime?: SessionRuntime;
+};
+
+function resolveResumeCandidate(
+  sessionManager: SessionManager,
+  topicResumeMap: import('../core/TopicResumeMap.js').TopicResumeMap,
+  sessionName: string,
+  session?: ResumeAwareSession,
+  options?: { allowClaudeMtimeFallback?: boolean },
+): { uuid: string | null; runtime: SessionRuntime; source: 'hook' | 'worker' | 'mtime' | 'none' } {
+  const runtimeSessionId = session?.runtimeSessionId ?? sessionManager.getRuntimeSessionIdForTmuxSession(sessionName);
+  const runtime = session?.runtime ?? (runtimeSessionId ? 'codex-cli' : 'claude-cli');
+  const uuid = topicResumeMap.findUuidForSession(
+    sessionName,
+    session?.claudeSessionId,
+    runtimeSessionId,
+    runtime,
+  );
+
+  if (uuid) {
+    return {
+      uuid,
+      runtime,
+      source: runtime === 'codex-cli' ? 'worker' : 'hook',
+    };
+  }
+
+  if (options?.allowClaudeMtimeFallback && runtime === 'claude-cli') {
+    const fallbackUuid = topicResumeMap.findClaudeSessionUuid();
+    if (fallbackUuid) {
+      return { uuid: fallbackUuid, runtime, source: 'mtime' };
+    }
+  }
+
+  return { uuid: null, runtime, source: 'none' };
+}
 
 async function spawnSessionForTopic(
   sessionManager: SessionManager,
@@ -522,10 +564,16 @@ async function spawnSessionForTopic(
         // Check if hook events have already populated the authoritative UUID
         const sessions = sessionManager.listRunningSessions();
         const session = sessions.find(s => s.tmuxSession === newSessionName);
-        const uuid = session?.claudeSessionId ?? _topicResumeMap!.findClaudeSessionUuid();
+        const { uuid, runtime, source } = resolveResumeCandidate(
+          sessionManager,
+          _topicResumeMap!,
+          newSessionName,
+          session,
+          { allowClaudeMtimeFallback: true },
+        );
         if (uuid) {
-          _topicResumeMap!.save(topicId, uuid, newSessionName);
-          console.log(`[spawnSessionForTopic] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+          _topicResumeMap!.save(topicId, uuid, newSessionName, runtime);
+          console.log(`[spawnSessionForTopic] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${source})`);
         }
       } catch (err) {
         console.error(`[spawnSessionForTopic] Proactive UUID save failed:`, err);
@@ -556,10 +604,12 @@ async function respawnSessionForTopic(
   // Save the old session's Claude UUID before respawning so --resume can reattach context
   if (_topicResumeMap) {
     try {
-      const uuid = _topicResumeMap.findUuidForSession(targetSession);
+      const sessions = sessionManager.listRunningSessions();
+      const session = sessions.find(s => s.tmuxSession === targetSession);
+      const { uuid, runtime, source } = resolveResumeCandidate(sessionManager, _topicResumeMap, targetSession, session);
       if (uuid) {
-        _topicResumeMap.save(topicId, uuid, targetSession);
-        console.log(`[telegram→session] Saved resume UUID ${uuid} for topic ${topicId}`);
+        _topicResumeMap.save(topicId, uuid, targetSession, runtime);
+        console.log(`[telegram→session] Saved resume UUID ${uuid} for topic ${topicId} (source: ${source})`);
       }
     } catch (err) {
       console.error(`[telegram→session] Failed to save resume UUID:`, err);
@@ -617,9 +667,11 @@ function wireTelegramCallbacks(
     // Save resume UUID before killing so the new session can --resume
     if (_topicResumeMap) {
       try {
-        const uuid = _topicResumeMap.findUuidForSession(sessionName);
+        const sessions = sessionManager.listRunningSessions();
+        const session = sessions.find(s => s.tmuxSession === sessionName);
+        const { uuid, runtime } = resolveResumeCandidate(sessionManager, _topicResumeMap, sessionName, session);
         if (uuid) {
-          _topicResumeMap.save(topicId, uuid, sessionName);
+          _topicResumeMap.save(topicId, uuid, sessionName, runtime);
         }
       } catch { /* best effort */ }
     }
@@ -1751,19 +1803,29 @@ export async function startServer(options: StartOptions): Promise<void> {
     _projectDir = config.sessions.projectDir;
 
     // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Prefer Anthropic API (faster, no tmux) → Claude CLI fallback.
+    // Prefer cheaper local/subscription-backed paths before paid APIs.
     // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
     let sharedIntelligence: IntelligenceProvider | undefined;
-    try {
-      const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-      if (apiProvider) {
-        sharedIntelligence = apiProvider;
-      }
-    } catch { /* no API key available */ }
-    if (!sharedIntelligence) {
+    if (config.sessions.runtime === 'copilot-cli' && config.sessions.copilotPath) {
+      try {
+        sharedIntelligence = new CopilotCliIntelligenceProvider(config.sessions.copilotPath, config.sessions.projectDir);
+      } catch { /* CLI not available */ }
+    } else if (config.sessions.runtime === 'codex-cli' && config.sessions.codexPath) {
+      try {
+        sharedIntelligence = new CodexCliIntelligenceProvider(config.sessions.codexPath, config.sessions.projectDir);
+      } catch { /* CLI not available */ }
+    } else if (config.sessions.runtime === 'claude-cli' && config.sessions.claudePath) {
       try {
         sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
       } catch { /* CLI not available */ }
+    }
+    if (!sharedIntelligence && config.sessions.runtime === 'claude-cli') {
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          sharedIntelligence = apiProvider;
+        }
+      } catch { /* no API key available */ }
     }
 
     _sharedIntelligence = sharedIntelligence ?? null;
@@ -1778,6 +1840,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       // Wire LLM intelligence for identity resolution.
       // Priority: Claude CLI (subscription, zero extra cost) > Anthropic API (explicit opt-in only)
       const claudePath = config.sessions.claudePath;
+      const codexPath = config.sessions.codexPath;
+      const copilotPath = config.sessions.copilotPath;
       let intelligenceMode = 'heuristic-only';
 
       // Check if user explicitly opted into API-based intelligence
@@ -1793,7 +1857,13 @@ export async function startServer(options: StartOptions): Promise<void> {
         } else {
           console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found'));
         }
-      } else if (claudePath) {
+      } else if (config.sessions.runtime === 'copilot-cli' && copilotPath) {
+        config.relationships.intelligence = new CopilotCliIntelligenceProvider(copilotPath, config.sessions.projectDir);
+        intelligenceMode = 'LLM-supervised (GitHub Copilot CLI)';
+      } else if (config.sessions.runtime === 'codex-cli' && codexPath) {
+        config.relationships.intelligence = new CodexCliIntelligenceProvider(codexPath, config.sessions.projectDir);
+        intelligenceMode = 'LLM-supervised (Codex CLI)';
+      } else if (config.sessions.runtime === 'claude-cli' && claudePath) {
         // Default: use Claude CLI via subscription (zero extra cost)
         config.relationships.intelligence = new ClaudeCliIntelligenceProvider(claudePath);
         intelligenceMode = 'LLM-supervised (Claude CLI subscription)';
@@ -2710,14 +2780,21 @@ export async function startServer(options: StartOptions): Promise<void> {
       const resumeHeartbeatInterval = setInterval(() => {
         try {
           const topicSessions = telegram!.getAllTopicSessions();
-          // Enrich with authoritative Claude session IDs from SessionManager
-          const enriched = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+          const sessions = sessionManager.listRunningSessions();
+	          const enriched = new Map<number, {
+	            sessionName: string;
+	            claudeSessionId?: string;
+	            runtimeSessionId?: string;
+	            runtime?: SessionRuntime;
+	          }>();
           for (const [topicId, sessionName] of topicSessions) {
-            const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
             enriched.set(topicId, {
               sessionName,
               claudeSessionId: session?.claudeSessionId ?? undefined,
+              runtimeSessionId: session?.runtimeSessionId
+                ?? sessionManager.getRuntimeSessionIdForTmuxSession(sessionName),
+              runtime: session?.runtime,
             });
           }
           _topicResumeMap?.refreshResumeMappings(enriched);
@@ -2738,11 +2815,21 @@ export async function startServer(options: StartOptions): Promise<void> {
         try {
           const topicId = telegram!.getTopicForSession(session.tmuxSession);
           if (!topicId) return;
-          // Use authoritative claudeSessionId from hook events, fall back to mtime heuristic
-          const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
+          const runtimeSessionId = session.runtimeSessionId
+            ?? sessionManager.getRuntimeSessionIdForTmuxSession(session.tmuxSession);
+          const { uuid, runtime, source } = resolveResumeCandidate(
+            sessionManager,
+            _topicResumeMap!,
+            session.tmuxSession,
+            {
+              claudeSessionId: session.claudeSessionId ?? undefined,
+              runtimeSessionId,
+              runtime: session.runtime,
+            },
+          );
           if (uuid) {
-            _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
-            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+            _topicResumeMap!.save(topicId, uuid, session.tmuxSession, runtime);
+            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${source})`);
           }
         } catch (err) {
           console.error(`[beforeSessionKill] Failed to save resume UUID:`, err);
@@ -2803,11 +2890,9 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Auto-summarize topics on session completion.
     // When a Telegram-linked session ends, check if its topic needs a summary update.
     // Uses Haiku for cost efficiency — summaries don't need deep reasoning.
-    if (topicMemory && telegram) {
+    if (topicMemory && telegram && sharedIntelligence) {
       const { TopicSummarizer } = await import('../memory/TopicSummarizer.js');
-      const { ClaudeCliIntelligenceProvider } = await import('../core/ClaudeCliIntelligenceProvider.js');
-      const summaryIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
-      const summarizer = new TopicSummarizer(summaryIntelligence, topicMemory);
+      const summarizer = new TopicSummarizer(sharedIntelligence, topicMemory);
 
       sessionManager.on('sessionComplete', (session) => {
         // Find the topic linked to this session
@@ -2966,7 +3051,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           clearStallForTopic: (topicId) => telegram!.clearStallTracking(topicId),
           spawnTriageSession: (name, options) => sessionManager.spawnTriageSession(name, options),
           getTriageSessionUuid: (sessionName) => {
-            return _topicResumeMap?.findUuidForSession(sessionName) ?? undefined;
+            return _topicResumeMap?.findUuidForSession(sessionName)
+              ?? sessionManager.getRuntimeSessionIdForTmuxSession(sessionName)
+              ?? undefined;
           },
           killTriageSession: (name) => {
             try {
@@ -3852,12 +3939,12 @@ export async function startServer(options: StartOptions): Promise<void> {
           try {
             const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
-            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
+            const { uuid, runtime } = resolveResumeCandidate(sessionManager, _topicResumeMap, sessionName, session);
             if (uuid) {
               const topicSessions = telegram.getAllTopicSessions();
               for (const [topicId, sessName] of topicSessions) {
                 if (sessName === sessionName) {
-                  _topicResumeMap.save(topicId, uuid, sessionName);
+                  _topicResumeMap.save(topicId, uuid, sessionName, runtime);
                   console.log(`[sentinel] Saved resume UUID ${uuid} for topic ${topicId} before kill`);
                   break;
                 }
@@ -3873,12 +3960,12 @@ export async function startServer(options: StartOptions): Promise<void> {
           try {
             const sessions = sessionManager.listRunningSessions();
             const session = sessions.find(s => s.tmuxSession === sessionName);
-            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
+            const { uuid, runtime } = resolveResumeCandidate(sessionManager, _topicResumeMap, sessionName, session);
             if (uuid) {
               const topicSessions = telegram.getAllTopicSessions();
               for (const [topicId, sessName] of topicSessions) {
                 if (sessName === sessionName) {
-                  _topicResumeMap.save(topicId, uuid, sessionName);
+                  _topicResumeMap.save(topicId, uuid, sessionName, runtime);
                   console.log(`[sentinel] Saved resume UUID ${uuid} for topic ${topicId} on pause`);
                   break;
                 }
@@ -4520,9 +4607,9 @@ export async function startServer(options: StartOptions): Promise<void> {
             let saved = 0;
             for (const [topicId, sessionName] of topicSessions) {
               const session = runningSessions.find(s => s.tmuxSession === sessionName);
-              const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
+              const { uuid, runtime } = resolveResumeCandidate(sessionManager, _topicResumeMap, sessionName, session);
               if (uuid) {
-                _topicResumeMap.save(topicId, uuid, sessionName);
+                _topicResumeMap.save(topicId, uuid, sessionName, runtime);
                 saved++;
               }
             }

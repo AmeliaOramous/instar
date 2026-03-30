@@ -108,6 +108,17 @@ describe('TriageOrchestrator', () => {
       expect(result!.action).toBe('reinject_message');
     });
 
+    it('detects Codex ready marker with pending message', () => {
+      const evidence = makeEvidence({
+        tmuxOutput: 'some output\nINSTAR_CODEX_READY\n',
+        pendingMessage: 'test message',
+      });
+      const result = orchestrator.runHeuristics(evidence);
+      expect(result).not.toBeNull();
+      expect(result!.classification).toBe('message_lost');
+      expect(result!.action).toBe('reinject_message');
+    });
+
     it('does NOT reinject when no pending message', () => {
       const evidence = makeEvidence({
         tmuxOutput: 'some output\n\n❯ ',

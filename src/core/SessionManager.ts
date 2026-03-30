@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Diagnostics for a single running session */
 export interface SessionDiagnostic {
@@ -42,9 +43,10 @@ export interface SessionDiagnostics {
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 import { InputGuard, type TopicBinding } from './InputGuard.js';
 import type { InputDetector } from '../monitoring/PromptGate.js';
+import { resolveCodexModel } from './models.js';
 
 const execFileAsync = promisify(execFile);
-import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
+import type { Session, SessionManagerConfig, SessionStatus, ModelTier, SessionRuntime } from './types.js';
 import { StateManager } from './StateManager.js';
 import { buildInjectionTag } from '../types/pipeline.js';
 import { sanitizeSenderName, sanitizeTopicName } from '../utils/sanitize.js';
@@ -60,6 +62,7 @@ const IDLE_PROMPT_PATTERNS = [
   'bypass permissions on',
   'shift+tab to cycle',
   'auto-accept edits',
+  'INSTAR_CODEX_READY',
   // The bare prompt character at end of output (after stripping ANSI)
 ];
 
@@ -147,6 +150,92 @@ export class SessionManager extends EventEmitter {
     this.state = state;
   }
 
+  private requireClaudePath(): string {
+    if (this.runtime() !== 'claude-cli') {
+      throw new Error(`Claude runtime requested from ${this.runtime()}`);
+    }
+    if (!this.config.claudePath) {
+      throw new Error('Claude CLI path is not configured.');
+    }
+    return this.config.claudePath;
+  }
+
+  private requireCodexPath(): string {
+    if (!this.config.codexPath) {
+      throw new Error('Codex CLI path is not configured.');
+    }
+    return this.config.codexPath;
+  }
+
+  private runtime(): SessionRuntime {
+    return this.config.runtime ?? 'claude-cli';
+  }
+
+  private assertPersistentRuntimeImplemented(): void {
+    if (this.runtime() === 'copilot-cli') {
+      throw new Error('copilot-cli tmux runtime is not implemented yet. See docs/COPILOT-CLI-RUNTIME-HANDOFF.md.');
+    }
+  }
+
+  private codexWorkerPath(): string {
+    return fileURLToPath(new URL('../runtime/CodexSessionWorker.js', import.meta.url));
+  }
+
+  private codexStateFile(tmuxSession: string): string {
+    const dir = path.join(this.config.projectDir, '.instar', 'state', 'codex-sessions');
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `${tmuxSession}.json`);
+  }
+
+  private readCodexStateFile(tmuxSession: string): { sessionId?: string } | null {
+    const stateFile = this.codexStateFile(tmuxSession);
+    if (!fs.existsSync(stateFile)) return null;
+
+    try {
+      return JSON.parse(fs.readFileSync(stateFile, 'utf-8')) as { sessionId?: string };
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveCodexSessionModel(model?: ModelTier): string {
+    const map = this.config.codexModelMap;
+
+    if (model === 'opus') return map?.opus ?? resolveCodexModel('capable');
+    if (model === 'haiku') return map?.haiku ?? resolveCodexModel('fast');
+    return map?.sonnet ?? resolveCodexModel('balanced');
+  }
+
+  private refreshRuntimeSessionId(session: Session): void {
+    if (session.runtime !== 'codex-cli') return;
+
+    const workerState = this.readCodexStateFile(session.tmuxSession);
+    const runtimeSessionId = workerState?.sessionId?.trim();
+    if (!runtimeSessionId || session.runtimeSessionId === runtimeSessionId) return;
+
+    session.runtimeSessionId = runtimeSessionId;
+    this.state.saveSession(session);
+  }
+
+  private sendCodexWorkerMessage(tmuxSession: string, text: string): boolean {
+    try {
+      const encoded = Buffer.from(text, 'utf-8').toString('base64');
+      execFileSync(
+        this.config.tmuxPath,
+        ['send-keys', '-t', `=${tmuxSession}:`, '-l', `__INSTAR_MSG__${encoded}`],
+        { encoding: 'utf-8', timeout: 5000 },
+      );
+      execFileSync(
+        this.config.tmuxPath,
+        ['send-keys', '-t', `=${tmuxSession}:`, 'Enter'],
+        { encoding: 'utf-8', timeout: 5000 },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * Set the InputGuard for cross-topic injection defense.
    * Must be called after construction with state dir info.
@@ -217,6 +306,32 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Resolve a runtime-native session ID for a tmux session.
+   * Codex-backed sessions persist this in the worker state file.
+   */
+  getRuntimeSessionIdForTmuxSession(tmuxSession: string): string | undefined {
+    const sessions = this.state.listSessions();
+    const session = sessions.find(s => s.tmuxSession === tmuxSession);
+
+    if (session?.runtimeSessionId) {
+      return session.runtimeSessionId;
+    }
+
+    const workerState = this.readCodexStateFile(tmuxSession);
+    const runtimeSessionId = workerState?.sessionId?.trim();
+    if (!runtimeSessionId) {
+      return session?.runtimeSessionId;
+    }
+
+    if (session && session.runtimeSessionId !== runtimeSessionId) {
+      session.runtimeSessionId = runtimeSessionId;
+      this.state.saveSession(session);
+    }
+
+    return runtimeSessionId;
+  }
+
+  /**
    * Look up the topic binding for a tmux session from the topic-session registry.
    * Returns null if the session is not bound to any topic.
    */
@@ -271,6 +386,8 @@ export class SessionManager extends EventEmitter {
     try {
       const running = this.state.listSessions({ status: 'running' });
       for (const session of running) {
+        this.refreshRuntimeSessionId(session);
+
         const alive = await this.isSessionAliveAsync(session.tmuxSession);
         if (!alive) {
           // Check if this session had a pending Telegram injection that never got a response
@@ -295,7 +412,7 @@ export class SessionManager extends EventEmitter {
         // Check for completion patterns even while session appears alive
         // (catches sessions where Claude finished but tmux is still open)
         if (!this.config.protectedSessions.includes(session.tmuxSession) &&
-            this.detectCompletion(session.tmuxSession)) {
+            await this.detectCompletionAsync(session.tmuxSession)) {
           console.log(`[SessionManager] Session "${session.name}" completed (pattern detected). Cleaning up.`);
           try {
             await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
@@ -331,6 +448,7 @@ export class SessionManager extends EventEmitter {
             console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m). Killing.`);
             // Emit beforeSessionKill BEFORE destroying the tmux session so
             // listeners (e.g. TopicResumeMap) can discover the Claude UUID.
+            this.refreshRuntimeSessionId(session);
             this.emit('beforeSessionKill', session);
             try {
               await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
@@ -351,19 +469,19 @@ export class SessionManager extends EventEmitter {
         // truth — no exemptions needed for subagents, topic bindings, or relay leases.
         // If the process tree shows work, the session is active. Period.
         if (!this.config.protectedSessions.includes(session.tmuxSession)) {
-          const output = this.captureOutput(session.tmuxSession, 5);
+          const output = await this.captureOutputAsync(session.tmuxSession, 5);
           const isIdleAtPrompt = output && IDLE_PROMPT_PATTERNS.some(p => output.includes(p));
 
           // ── Prompt Gate: feed captured output to InputDetector ──
           if (this.promptDetector && output) {
-            const fullOutput = this.captureOutput(session.tmuxSession, 50);
+            const fullOutput = await this.captureOutputAsync(session.tmuxSession, 50);
             if (fullOutput) {
               this.promptDetector.onCapture(session.tmuxSession, fullOutput);
             }
           }
 
           // Two conditions must BOTH be true for idle: prompt pattern + no active processes
-          const isActuallyIdle = isIdleAtPrompt && !this.hasActiveProcesses(session.tmuxSession);
+          const isActuallyIdle = isIdleAtPrompt && !(await this.hasActiveProcessesAsync(session.tmuxSession));
 
           if (isActuallyIdle) {
             const now = Date.now();
@@ -374,7 +492,7 @@ export class SessionManager extends EventEmitter {
               // If the session went idle because of an API error (not a natural stop),
               // inject a nudge to get it working again instead of waiting 15m to kill.
               if (!this.errorNudgedSessions.has(session.id)) {
-                const recentOutput = this.captureOutput(session.tmuxSession, 30);
+                const recentOutput = await this.captureOutputAsync(session.tmuxSession, 30);
                 if (recentOutput) {
                   const hasError = TERMINAL_ERROR_PATTERNS.some(p => recentOutput.includes(p));
                   if (hasError) {
@@ -402,6 +520,7 @@ export class SessionManager extends EventEmitter {
                   });
                 }
                 console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m with no active processes. Killing zombie.`);
+                this.refreshRuntimeSessionId(session);
                 this.emit('beforeSessionKill', session);
                 try {
                   await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
@@ -458,7 +577,9 @@ export class SessionManager extends EventEmitter {
     triggeredBy?: string;
     maxDurationMinutes?: number;
   }): Promise<Session> {
-    const runningSessions = this.listRunningSessions();
+    this.assertPersistentRuntimeImplemented();
+    const cached = this.getCachedRunningSessions();
+    const runningSessions = cached.count > 0 ? cached.sessions : this.listRunningSessions();
     if (runningSessions.length >= this.config.maxSessions) {
       throw new Error(
         `Max sessions (${this.config.maxSessions}) reached. ` +
@@ -475,19 +596,8 @@ export class SessionManager extends EventEmitter {
       throw new Error(`tmux session "${tmuxSession}" already exists`);
     }
 
-    // Build Claude CLI arguments — no shell intermediary.
-    // tmux new-session executes the command directly (no bash -c needed)
-    // when given as separate arguments after the session options.
-    // Use -e CLAUDECODE= to unset the CLAUDECODE env var in spawned sessions,
-    // preventing nested Claude Code detection when instar runs inside Claude Code.
-    const claudeArgs = ['--dangerously-skip-permissions'];
-    if (options.model) {
-      claudeArgs.push('--model', options.model);
-    }
-    claudeArgs.push('-p', options.prompt);
-
     try {
-      execFileSync(this.config.tmuxPath, [
+      const tmuxArgs = [
         'new-session', '-d',
         '-s', tmuxSession,
         '-c', this.config.projectDir,
@@ -504,8 +614,31 @@ export class SessionManager extends EventEmitter {
         '-e', 'DATABASE_URL_PROD=',
         '-e', 'DATABASE_URL_DEV=',
         '-e', 'DATABASE_URL_TEST=',
-        this.config.claudePath, ...claudeArgs,
-      ], { encoding: 'utf-8' });
+      ];
+
+      if (this.runtime() === 'codex-cli') {
+        const codexPath = this.requireCodexPath();
+        tmuxArgs.push(
+          codexPath,
+          'exec',
+          '--color', 'never',
+          '--skip-git-repo-check',
+          '-C', this.config.projectDir,
+          '-s', this.config.codexSandboxMode ?? 'danger-full-access',
+          '-m', this.resolveCodexSessionModel(options.model),
+          options.prompt,
+        );
+      } else {
+        const claudePath = this.requireClaudePath();
+        const claudeArgs = ['--dangerously-skip-permissions'];
+        if (options.model) {
+          claudeArgs.push('--model', options.model);
+        }
+        claudeArgs.push('-p', options.prompt);
+        tmuxArgs.push(claudePath, ...claudeArgs);
+      }
+
+      execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
 
       // Increase tmux scrollback buffer for dashboard history support
       try {
@@ -530,9 +663,12 @@ export class SessionManager extends EventEmitter {
       model: options.model,
       prompt: options.prompt,
       maxDurationMinutes: options.maxDurationMinutes,
+      runtime: this.runtime(),
     };
 
     this.state.saveSession(session);
+    this._cachedRunningSessions = [...this._cachedRunningSessions, session];
+    this._cachedRunningCount = this._cachedRunningSessions.length;
     return session;
   }
 
@@ -646,6 +782,8 @@ export class SessionManager extends EventEmitter {
     session.status = 'killed';
     session.endedAt = new Date().toISOString();
     this.state.saveSession(session);
+    this._cachedRunningSessions = this._cachedRunningSessions.filter(s => s.id !== sessionId);
+    this._cachedRunningCount = this._cachedRunningSessions.length;
     return true;
   }
 
@@ -724,6 +862,60 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  private async hasActiveProcessesAsync(tmuxSession: string): Promise<boolean> {
+    try {
+      const { stdout: paneStdout } = await execFileAsync(
+        this.config.tmuxPath,
+        ['list-panes', '-t', `=${tmuxSession}:`, '-F', '#{pane_pid}'],
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      const panePid = paneStdout.trim();
+
+      if (!panePid || !/^\d+$/.test(panePid)) return false;
+
+      const { stdout: psOutput } = await execFileAsync(
+        'ps', ['-eo', 'pid,ppid,command'],
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+
+      const processes = new Map<string, { ppid: string; command: string }>();
+      for (const line of psOutput.split('\n').slice(1)) {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+        if (match) {
+          processes.set(match[1], { ppid: match[2], command: match[3] });
+        }
+      }
+
+      const descendants: Array<{ pid: string; command: string }> = [];
+      const queue = [panePid];
+      while (queue.length > 0) {
+        const parentPid = queue.shift()!;
+        for (const [pid, info] of processes) {
+          if (info.ppid === parentPid && pid !== panePid) {
+            descendants.push({ pid, command: info.command });
+            queue.push(pid);
+          }
+        }
+      }
+
+      const activeProcesses = descendants.filter(p => {
+        return !BASELINE_PROCESS_PATTERNS.some(pattern => pattern.test(p.command));
+      });
+
+      const nonClaude = activeProcesses.filter(p => {
+        const proc = processes.get(p.pid);
+        if (proc?.ppid === panePid) {
+          return !/\bclaude\b/.test(p.command) && !/\bnode\b.*\bclaude\b/.test(p.command);
+        }
+        return true;
+      });
+
+      return nonClaude.length > 0;
+    } catch {
+      return true;
+    }
+  }
+
   /**
    * Capture the current output of a tmux session.
    */
@@ -741,10 +933,26 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  private async captureOutputAsync(tmuxSession: string, lines: number = 100): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync(
+        this.config.tmuxPath,
+        ['capture-pane', '-t', `=${tmuxSession}:`, '-p', '-S', `-${lines}`],
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      return stdout;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Send input to a running tmux session.
    */
   sendInput(tmuxSession: string, input: string): boolean {
+    if (this.runtime() === 'codex-cli') {
+      return this.sendCodexWorkerMessage(tmuxSession, input);
+    }
     try {
       // Note: use `=session:` (trailing colon) for pane-level tmux commands
       // Send text literally, then Enter separately
@@ -819,11 +1027,13 @@ export class SessionManager extends EventEmitter {
     if (running.length === 0) return 0;
 
     let purged = 0;
+    const aliveSessions: Session[] = [];
     for (const session of running) {
       try {
         execFileSync(this.config.tmuxPath, ['has-session', '-t', `=${session.tmuxSession}`], {
           stdio: 'ignore', timeout: 1000,
         });
+        aliveSessions.push(session);
       } catch {
         // tmux session doesn't exist — purge the record
         session.status = 'completed';
@@ -832,6 +1042,9 @@ export class SessionManager extends EventEmitter {
         purged++;
       }
     }
+
+    this._cachedRunningSessions = aliveSessions;
+    this._cachedRunningCount = aliveSessions.length;
 
     if (purged > 0) {
       console.log(`[SessionManager] Startup purge: removed ${purged} dead session(s) of ${running.length} tracked`);
@@ -937,6 +1150,15 @@ export class SessionManager extends EventEmitter {
     );
   }
 
+  private async detectCompletionAsync(tmuxSession: string): Promise<boolean> {
+    const output = await this.captureOutputAsync(tmuxSession, 30);
+    if (!output) return false;
+
+    return this.config.completionPatterns.some(pattern =>
+      output.includes(pattern)
+    );
+  }
+
   /**
    * Reap completed/zombie sessions.
    */
@@ -1007,6 +1229,7 @@ export class SessionManager extends EventEmitter {
    * Optionally sends an initial message after Claude is ready.
    */
   async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; resumeSessionId?: string }): Promise<string> {
+    this.assertPersistentRuntimeImplemented();
     const sanitized = name
       ? name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
       : null;
@@ -1070,11 +1293,30 @@ export class SessionManager extends EventEmitter {
         tmuxArgs.push('-e', `INSTAR_TELEGRAM_TOPIC=${options.telegramTopicId}`);
       }
 
-      tmuxArgs.push(this.config.claudePath, '--dangerously-skip-permissions');
+      if (this.runtime() === 'codex-cli') {
+        const codexPath = this.requireCodexPath();
+        const workerStateFile = this.codexStateFile(tmuxSession);
+        tmuxArgs.push(
+          process.execPath,
+          this.codexWorkerPath(),
+          '--codex-path', codexPath,
+          '--cwd', this.config.projectDir,
+          '--sandbox', this.config.codexSandboxMode ?? 'danger-full-access',
+          '--model', this.resolveCodexSessionModel('haiku'),
+          '--state-file', workerStateFile,
+        );
+        if (options?.resumeSessionId) {
+          tmuxArgs.push('--resume-session', options.resumeSessionId);
+          console.log(`[SessionManager] Resuming Codex session: ${options.resumeSessionId}`);
+        }
+      } else {
+        const claudePath = this.requireClaudePath();
+        tmuxArgs.push(claudePath, '--dangerously-skip-permissions');
 
-      if (options?.resumeSessionId) {
-        tmuxArgs.push('--resume', options.resumeSessionId);
-        console.log(`[SessionManager] Resuming session: ${options.resumeSessionId}`);
+        if (options?.resumeSessionId) {
+          tmuxArgs.push('--resume', options.resumeSessionId);
+          console.log(`[SessionManager] Resuming session: ${options.resumeSessionId}`);
+        }
       }
 
       execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
@@ -1100,26 +1342,25 @@ export class SessionManager extends EventEmitter {
       startedAt: new Date().toISOString(),
       prompt: initialMessage,
       maxDurationMinutes: DEFAULT_MAX_DURATION_MINUTES,
+      runtime: this.runtime(),
+      runtimeSessionId: options?.resumeSessionId,
     };
     this.state.saveSession(session);
 
-    // Wait for Claude to be ready, then send the initial message
-    // Resume sessions load large JONSLs which trigger TUI redraws — use longer timeout
-    // and a stabilization delay to avoid injecting text that gets wiped by the redraw.
+    // Wait for the runtime to be ready, then send the initial message.
+    // Claude resume sessions load large JSONLs which trigger TUI redraws — use a
+    // stabilization delay there. Codex worker sessions do not need the extra wait.
     const readyTimeout = options?.resumeSessionId ? 60000 : 30000;
     if (initialMessage) {
       this.waitForClaudeReady(tmuxSession, readyTimeout).then((ready) => {
         if (ready) {
-          // Stabilization delay: Claude's TUI may redraw after loading large JONSLs,
-          // clearing any text injected too early. Wait for the redraw to settle.
-          const stabilizationMs = options?.resumeSessionId ? 5000 : 0;
+          const stabilizationMs = this.runtime() === 'claude-cli' && options?.resumeSessionId ? 5000 : 0;
           setTimeout(() => {
             this.injectMessage(tmuxSession, initialMessage);
             console.log(`[SessionManager] Injected initial message into "${tmuxSession}" (${initialMessage.length} chars${stabilizationMs ? ', after stabilization delay' : ''})`);
           }, stabilizationMs);
         } else {
-          console.error(`[SessionManager] Claude not ready in session "${tmuxSession}" — message NOT injected. Session may need manual intervention.`);
-          // Still try to inject — Claude might be ready but prompt detection failed
+          console.error(`[SessionManager] Runtime not ready in session "${tmuxSession}" — message NOT injected. Session may need manual intervention.`);
           if (this.tmuxSessionExists(tmuxSession)) {
             console.log(`[SessionManager] Session "${tmuxSession}" still alive — attempting injection anyway`);
             this.injectMessage(tmuxSession, initialMessage);
@@ -1145,6 +1386,7 @@ export class SessionManager extends EventEmitter {
     permissionMode: string;
     resumeSessionId?: string;
   }): Promise<string> {
+    this.assertPersistentRuntimeImplemented();
     const sanitized = name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
     const projectBase = path.basename(this.config.projectDir);
     const tmuxSession = `${projectBase}-${sanitized}`;
@@ -1183,17 +1425,36 @@ export class SessionManager extends EventEmitter {
         '-e', 'DATABASE_URL_TEST=',
       ];
 
-      tmuxArgs.push(this.config.claudePath);
+      if (this.runtime() === 'codex-cli') {
+        const codexPath = this.requireCodexPath();
+        const workerStateFile = this.codexStateFile(tmuxSession);
+        tmuxArgs.push(
+          process.execPath,
+          this.codexWorkerPath(),
+          '--codex-path', codexPath,
+          '--cwd', this.config.projectDir,
+          '--sandbox', 'read-only',
+          '--model', this.resolveCodexSessionModel('sonnet'),
+          '--state-file', workerStateFile,
+        );
+        if (options.resumeSessionId) {
+          tmuxArgs.push('--resume-session', options.resumeSessionId);
+          console.log(`[SessionManager] Resuming Codex triage session: ${options.resumeSessionId}`);
+        }
+      } else {
+        const claudePath = this.requireClaudePath();
+        tmuxArgs.push(claudePath);
 
-      // Scoped permissions: allowedTools + permissionMode (NOT --dangerously-skip-permissions)
-      if (options.allowedTools.length > 0) {
-        tmuxArgs.push('--allowedTools', options.allowedTools.join(','));
-      }
-      tmuxArgs.push('--permission-mode', options.permissionMode);
+        // Scoped permissions: allowedTools + permissionMode (NOT --dangerously-skip-permissions)
+        if (options.allowedTools.length > 0) {
+          tmuxArgs.push('--allowedTools', options.allowedTools.join(','));
+        }
+        tmuxArgs.push('--permission-mode', options.permissionMode);
 
-      if (options.resumeSessionId) {
-        tmuxArgs.push('--resume', options.resumeSessionId);
-        console.log(`[SessionManager] Resuming triage session: ${options.resumeSessionId}`);
+        if (options.resumeSessionId) {
+          tmuxArgs.push('--resume', options.resumeSessionId);
+          console.log(`[SessionManager] Resuming triage session: ${options.resumeSessionId}`);
+        }
       }
 
       execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
@@ -1218,6 +1479,8 @@ export class SessionManager extends EventEmitter {
       tmuxSession,
       startedAt: new Date().toISOString(),
       maxDurationMinutes: 10,
+      runtime: this.runtime(),
+      runtimeSessionId: options.resumeSessionId,
     };
     this.state.saveSession(session);
 
@@ -1483,6 +1746,12 @@ export class SessionManager extends EventEmitter {
 
     const exactTarget = `=${tmuxSession}:`;
     try {
+      if (this.runtime() === 'codex-cli') {
+        if (!this.sendCodexWorkerMessage(tmuxSession, text)) {
+          throw new Error('failed to send Codex worker message');
+        }
+        return;
+      }
       if (text.includes('\n')) {
         // Multi-line: use bracketed paste mode.
         // The terminal (and Claude Code's readline) treats everything between
@@ -1544,8 +1813,11 @@ export class SessionManager extends EventEmitter {
       // (e.g., during TUI redraw of a resumed session's history).
       const lines = (output || '').split('\n').filter(l => l.trim());
       const tail = lines.slice(-3).join('\n');
-      if (tail.includes('❯') || tail.includes('bypass permissions')) {
-        console.log(`[SessionManager] Claude ready in "${tmuxSession}" after ${Date.now() - start}ms`);
+      const ready = this.runtime() === 'codex-cli'
+        ? tail.includes('INSTAR_CODEX_READY')
+        : tail.includes('❯') || tail.includes('bypass permissions');
+      if (ready) {
+        console.log(`[SessionManager] ${this.runtime()} ready in "${tmuxSession}" after ${Date.now() - start}ms`);
         return true;
       }
       await new Promise(r => setTimeout(r, 500));

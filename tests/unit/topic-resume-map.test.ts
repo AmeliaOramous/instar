@@ -119,6 +119,13 @@ describe('TopicResumeMap — CRUD', () => {
     expect(resumeMap.get(42)).toBe(TEST_UUID_1);
     expect(resumeMap.get(99)).toBe(TEST_UUID_2);
   });
+
+  it('save and get round-trips codex runtime thread IDs without Claude JSONL files', () => {
+    const threadId = 'thread_codex_123';
+    resumeMap.save(42, threadId, 'briar-topic', 'codex-cli');
+
+    expect(resumeMap.get(42)).toBe(threadId);
+  });
 });
 
 // ─── UUID Discovery ─────────────────────────────────────────
@@ -148,6 +155,12 @@ describe('TopicResumeMap — UUID Discovery', () => {
 
     const uuid = resumeMap.findClaudeSessionUuid();
     expect(uuid).toBe(TEST_UUID_1);
+  });
+
+  it('findUuidForSession returns Codex runtime session IDs directly', () => {
+    const threadId = 'thread_codex_resume_456';
+    const uuid = resumeMap.findUuidForSession('briar-topic', undefined, threadId, 'codex-cli');
+    expect(uuid).toBe(threadId);
   });
 });
 

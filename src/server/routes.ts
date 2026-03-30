@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
-import type { InstarConfig } from '../core/types.js';
+import type { InstarConfig, SessionRuntime } from '../core/types.js';
 import { rateLimiter, signViewPath } from './middleware.js';
 import type { WriteOperation, WriteToken } from '../core/StateWriteAuthority.js';
 import { validateWriteToken, canPerformOperation } from '../core/StateWriteAuthority.js';
@@ -158,6 +158,49 @@ export interface RouteContext {
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]{1,200}$/;
 const JOB_SLUG_RE = /^[a-zA-Z0-9_-]{1,100}$/;
 const VALID_SORTS = ['significance', 'recent', 'name'] as const;
+
+type ResumeAwareSession = {
+  claudeSessionId?: string;
+  runtimeSessionId?: string;
+  runtime?: SessionRuntime;
+};
+
+function resolveResumeCandidate(
+  ctx: Pick<RouteContext, 'sessionManager' | 'topicResumeMap'>,
+  sessionName: string,
+  session?: ResumeAwareSession,
+  options?: { allowClaudeMtimeFallback?: boolean },
+): { uuid: string | null; runtime: SessionRuntime; source: 'hook' | 'worker' | 'mtime' | 'none' } {
+  if (!ctx.topicResumeMap) {
+    return { uuid: null, runtime: 'claude-cli', source: 'none' };
+  }
+
+  const runtimeSessionId = session?.runtimeSessionId ?? ctx.sessionManager.getRuntimeSessionIdForTmuxSession(sessionName);
+  const runtime = session?.runtime ?? (runtimeSessionId ? 'codex-cli' : 'claude-cli');
+  const uuid = ctx.topicResumeMap.findUuidForSession(
+    sessionName,
+    session?.claudeSessionId,
+    runtimeSessionId,
+    runtime,
+  );
+
+  if (uuid) {
+    return {
+      uuid,
+      runtime,
+      source: runtime === 'codex-cli' ? 'worker' : 'hook',
+    };
+  }
+
+  if (options?.allowClaudeMtimeFallback && runtime === 'claude-cli') {
+    const fallbackUuid = ctx.topicResumeMap.findClaudeSessionUuid();
+    if (fallbackUuid) {
+      return { uuid: fallbackUuid, runtime, source: 'mtime' };
+    }
+  }
+
+  return { uuid: null, runtime, source: 'none' };
+}
 
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
@@ -4766,10 +4809,15 @@ export function createRoutes(ctx: RouteContext): Router {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
+                const { uuid, runtime, source } = resolveResumeCandidate(
+                  ctx,
+                  newSessionName,
+                  session,
+                  { allowClaudeMtimeFallback: true },
+                );
                 if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName, runtime);
+                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${source})`);
                 }
               } catch (err) {
                 console.error(`[secret-drop] Proactive UUID save failed:`, err);
@@ -5083,10 +5131,15 @@ export function createRoutes(ctx: RouteContext): Router {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
+                const { uuid, runtime, source } = resolveResumeCandidate(
+                  ctx,
+                  newSessionName,
+                  session,
+                  { allowClaudeMtimeFallback: true },
+                );
                 if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName, runtime);
+                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${source})`);
                 }
               } catch (err) {
                 console.error(`[telegram-forward] Proactive UUID save failed:`, err);

@@ -27,6 +27,10 @@ export interface Session {
   prompt?: string;
   /** Maximum duration in minutes before the session is killed */
   maxDurationMinutes?: number;
+  /** Runtime backing this session */
+  runtime?: SessionRuntime;
+  /** Runtime-native session/thread ID (for Codex resume or future runtimes) */
+  runtimeSessionId?: string;
   /** Claude Code's own session UUID (from hook events). Populated lazily on first hook event. */
   claudeSessionId?: string;
 }
@@ -35,11 +39,19 @@ export type SessionStatus = 'starting' | 'running' | 'completed' | 'failed' | 'k
 
 export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 
+export type SessionRuntime = 'claude-cli' | 'codex-cli' | 'copilot-cli';
+
 export interface SessionManagerConfig {
+  /** Agent runtime backend */
+  runtime?: SessionRuntime;
   /** Path to tmux binary */
   tmuxPath: string;
   /** Path to claude CLI binary */
-  claudePath: string;
+  claudePath?: string;
+  /** Path to Codex CLI binary */
+  codexPath?: string;
+  /** Path to GitHub Copilot CLI binary */
+  copilotPath?: string;
   /** Project directory (where CLAUDE.md lives) */
   projectDir: string;
   /** Maximum concurrent sessions */
@@ -53,6 +65,12 @@ export interface SessionManagerConfig {
   authToken?: string;
   /** Server port — used to construct INSTAR_SERVER_URL for HTTP hooks */
   port?: number;
+  /** Codex model mapping by abstract tier for cost-aware routing */
+  codexModelMap?: Partial<Record<ModelTier, string>>;
+  /** Copilot CLI model mapping by abstract tier for cost-aware routing */
+  copilotModelMap?: Partial<Record<ModelTier, string>>;
+  /** Sandbox mode for Codex exec-backed sessions */
+  codexSandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 
 // ── Job Scheduling ──────────────────────────────────────────────────

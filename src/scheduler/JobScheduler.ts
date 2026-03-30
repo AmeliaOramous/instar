@@ -313,7 +313,7 @@ export class JobScheduler {
     }
 
     // Check session capacity
-    const runningSessions = this.sessionManager.listRunningSessions();
+    const runningSessions = this.getRunningSessionsSnapshot();
     const jobSessions = runningSessions.filter(s => s.jobSlug);
     if (jobSessions.length >= this.config.maxParallelJobs) {
       this.enqueue(slug, reason);
@@ -356,7 +356,7 @@ export class JobScheduler {
   processQueue(): void {
     if (this.paused || this.queue.length === 0) return;
 
-    const runningSessions = this.sessionManager.listRunningSessions();
+    const runningSessions = this.getRunningSessionsSnapshot();
     const jobSessions = runningSessions.filter(s => s.jobSlug);
     if (jobSessions.length >= this.config.maxParallelJobs) return;
 
@@ -394,7 +394,7 @@ export class JobScheduler {
    * Get scheduler status for the /status endpoint.
    */
   getStatus(): SchedulerStatus {
-    const runningSessions = this.sessionManager.listRunningSessions();
+    const runningSessions = this.getRunningSessionsSnapshot();
     return {
       running: this.running,
       paused: this.paused,
@@ -439,6 +439,10 @@ export class JobScheduler {
    */
   getRunHistory(): JobRunHistory {
     return this.runHistory;
+  }
+
+  private getRunningSessionsSnapshot() {
+    return this.sessionManager.getCachedRunningSessions().sessions;
   }
 
   private enqueue(slug: string, reason: string): void {
