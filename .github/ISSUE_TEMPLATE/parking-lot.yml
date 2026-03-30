@@ -1,0 +1,43 @@
+name: Parking Lot Item
+description: Capture a new idea for later exploration
+labels: ["parking-lot"]
+title: "[PL] <short title>"
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences capturing the idea
+      placeholder: What is the idea?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / Why now
+      description: Why does this matter? What problem does it solve?
+  - type: textarea
+    id: scope
+    attributes:
+      label: Rough scope / Constraints
+      description: What would a v1 include? Any blockers?
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owner
+      description: Who will drive this?
+  - type: textarea
+    id: links
+    attributes:
+      label: Links
+      description: Notes, references, or related issues
