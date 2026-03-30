@@ -26,6 +26,11 @@ interface CodexEvent {
   };
 }
 
+interface ExecFileErrorWithOutput extends Error {
+  stdout?: string | Buffer;
+  stderr?: string | Buffer;
+}
+
 export interface RunCodexPromptOptions {
   codexPath: string;
   cwd: string;
@@ -128,6 +133,12 @@ function latestAgentMessage(events: CodexEvent[]): string {
   return '';
 }
 
+function outputToText(output: string | Buffer | undefined): string {
+  if (typeof output === 'string') return output;
+  if (Buffer.isBuffer(output)) return output.toString('utf-8');
+  return '';
+}
+
 function extractUsage(events: CodexEvent[]): TokenUsage | null {
   for (let i = events.length - 1; i >= 0; i -= 1) {
     const event = events[i] as CodexEvent & {
@@ -205,6 +216,18 @@ export async function runCodexPrompt(options: RunCodexPromptOptions): Promise<Ru
         events,
       };
     } catch (error) {
+      const execError = error as ExecFileErrorWithOutput;
+      const failureEvents = parseCodexEvents(outputToText(execError.stdout));
+      const failureText = eventError(failureEvents) || outputToText(execError.stderr).trim();
+
+      if (failureText) {
+        if (isUnsupportedModelError(failureEvents) || failureText.includes('model is not supported')) {
+          lastError = failureText;
+          continue;
+        }
+        throw new Error(failureText);
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('model is not supported')) {
         lastError = message;
