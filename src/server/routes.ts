@@ -5105,6 +5105,45 @@ export function createRoutes(ctx: RouteContext): Router {
   // ── Plan Prompt Relay (from hook) ─────────────────────────────
   // Receives plan mode entry events from the PreToolUse hook on EnterPlanMode.
   // Relays the plan to Telegram for user approval via inline keyboard.
+  // The hook polls /hooks/plan-prompt/status until the user responds.
+
+  // Track pending plan prompts so the hook can poll for resolution.
+  // Key: promptId, Value: { resolved, key, sessionName, createdAt }
+  const pendingPlanPrompts = new Map<string, {
+    resolved: boolean;
+    key?: string;
+    sessionName: string;
+    createdAt: number;
+  }>();
+
+  // Evict stale entries every 5 minutes (prompts older than 10 min)
+  setInterval(() => {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [id, entry] of pendingPlanPrompts) {
+      if (entry.createdAt < cutoff) pendingPlanPrompts.delete(id);
+    }
+  }, 5 * 60 * 1000);
+
+  // Wire resolution: when a prompt callback fires, mark the plan prompt as resolved.
+  // This is called from the onPromptResponse path in TelegramAdapter.
+  const resolvePlanPrompt = (sessionName: string, key: string) => {
+    for (const [id, entry] of pendingPlanPrompts) {
+      if (entry.sessionName === sessionName && !entry.resolved) {
+        entry.resolved = true;
+        entry.key = key;
+        console.log(`[PlanRelay] Prompt ${id} resolved: session="${sessionName}" key="${key}"`);
+        break;
+      }
+    }
+  };
+  // Internal endpoint — called by onPromptResponse to mark plan prompts resolved
+  router.post('/hooks/plan-prompt/resolve', (req, res) => {
+    const { sessionName, key } = req.body;
+    if (sessionName && key) {
+      resolvePlanPrompt(sessionName, key);
+    }
+    res.json({ ok: true });
+  });
 
   router.post('/hooks/plan-prompt', async (req, res) => {
     const { event, session_id, tool_input, instar_sid } = req.body;
@@ -5155,6 +5194,9 @@ export function createRoutes(ctx: RouteContext): Router {
 
     // Build a DetectedPrompt and relay it
     try {
+      const promptId = crypto.randomUUID().slice(0, 8);
+      const sessionName = tmuxSession || session?.tmuxSession || 'unknown';
+
       const prompt = {
         type: 'plan' as const,
         raw: '',
@@ -5164,18 +5206,41 @@ export function createRoutes(ctx: RouteContext): Router {
           { key: '2', label: 'Yes, manually approve edits' },
           { key: '3', label: 'Tell Claude what to change' },
         ],
-        sessionName: tmuxSession || session?.tmuxSession || 'unknown',
+        sessionName,
         detectedAt: Date.now(),
-        id: crypto.randomUUID().slice(0, 8),
+        id: promptId,
       };
 
+      // Track the pending prompt so the hook can poll for resolution
+      pendingPlanPrompts.set(promptId, {
+        resolved: false,
+        sessionName,
+        createdAt: Date.now(),
+      });
+
       await ctx.telegram.relayPrompt(topicId, prompt);
-      console.log(`[PlanRelay] Relayed plan prompt to topic ${topicId} for session ${tmuxSession || session?.tmuxSession}`);
-      res.json({ ok: true, topicId });
+      console.log(`[PlanRelay] Relayed plan prompt ${promptId} to topic ${topicId} for session ${sessionName}`);
+      res.json({ ok: true, topicId, promptId });
     } catch (err) {
       console.error(`[PlanRelay] Failed:`, err instanceof Error ? err.message : err);
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // Status endpoint — the hook polls this to know when the user has responded
+  router.get('/hooks/plan-prompt/status', (req, res) => {
+    const promptId = req.query.id as string;
+    if (!promptId) {
+      res.status(400).json({ error: 'missing id parameter' });
+      return;
+    }
+    const entry = pendingPlanPrompts.get(promptId);
+    if (!entry) {
+      // Unknown prompt — tell hook to stop polling
+      res.json({ resolved: true, key: '1', reason: 'unknown prompt' });
+      return;
+    }
+    res.json({ resolved: entry.resolved, key: entry.key });
   });
 
   // ── Telegram Callback Query Forwarding (from Lifeline) ────────
