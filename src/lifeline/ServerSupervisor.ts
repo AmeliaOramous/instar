@@ -639,7 +639,8 @@ export class ServerSupervisor extends EventEmitter {
   private async checkHealth(): Promise<boolean> {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
+      // Allow brief scheduler/tmux bursts without treating the server as dead.
+      const timer = setTimeout(() => controller.abort(), 10000);
       try {
         const response = await fetch(`http://127.0.0.1:${this.port}/health`, {
           signal: controller.signal,

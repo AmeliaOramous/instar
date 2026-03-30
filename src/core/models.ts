@@ -16,8 +16,11 @@
  * ARCHITECTURE:
  *   - ANTHROPIC_MODELS: bare model IDs for direct API calls
  *   - CLI_MODEL_FLAGS: CLI model flags for Claude CLI provider
+ *   - CODEX_MODEL_FLAGS: model IDs for Codex CLI provider
  *   - resolveModelId(): converts tier names to model IDs
  *   - resolveCliFlag(): converts tier names to CLI flags
+ *   - resolveCodexModel(): converts tier names to Codex model IDs
+ *   - resolveCopilotModel(): converts tier names to Copilot CLI model IDs
  */
 
 // =============================================================================
@@ -51,6 +54,41 @@ export const CLI_MODEL_FLAGS = Object.freeze({
   opus: 'opus',
   sonnet: 'sonnet',
   haiku: 'haiku',
+} as const);
+
+// =============================================================================
+// Codex CLI Model IDs (for ChatGPT/OpenAI-backed runtime)
+// =============================================================================
+
+/**
+ * Default cost-aware mapping for Codex CLI.
+ *
+ * `haiku` prefers `gpt-5-mini` for cheapest execution. ChatGPT-backed Codex
+ * accounts may reject that model; CodexCliIntelligenceProvider and the Codex
+ * session worker automatically fall back to `gpt-5` in that case.
+ */
+export const CODEX_MODEL_FLAGS = Object.freeze({
+  opus: 'gpt-5.4',
+  sonnet: 'gpt-5',
+  haiku: 'gpt-5-mini',
+} as const);
+
+// =============================================================================
+// GitHub Copilot CLI Model IDs
+// =============================================================================
+
+/**
+ * Provisional cheap-first defaults for Copilot CLI.
+ *
+ * These model IDs are based on GitHub's March 29, 2026 documentation:
+ * GPT-5 mini is included on paid plans, GPT-4.1 is included, and Claude Sonnet
+ * 4.5 remains the documented default model for Copilot CLI. Real-world support
+ * should be validated on a box with Copilot CLI installed.
+ */
+export const COPILOT_MODEL_FLAGS = Object.freeze({
+  haiku: 'gpt-5-mini',
+  sonnet: 'gpt-4.1',
+  opus: 'claude-sonnet-4.5',
 } as const);
 
 // =============================================================================
@@ -121,6 +159,54 @@ export function resolveCliFlag(tierOrFlag: string): string {
   }
 
   return tierOrFlag;
+}
+
+/**
+ * Resolve a tier name to a Codex CLI model ID.
+ * Supports both naming conventions (tier names and legacy aliases).
+ */
+export function resolveCodexModel(tierOrModel: string): string {
+  const key = tierOrModel.toLowerCase();
+
+  if (key in CODEX_MODEL_FLAGS) {
+    return CODEX_MODEL_FLAGS[key as ModelTierName];
+  }
+
+  const LEGACY_ALIASES: Record<string, ModelTierName> = {
+    fast: 'haiku',
+    balanced: 'sonnet',
+    capable: 'opus',
+  };
+
+  if (key in LEGACY_ALIASES) {
+    return CODEX_MODEL_FLAGS[LEGACY_ALIASES[key]];
+  }
+
+  return tierOrModel;
+}
+
+/**
+ * Resolve a tier name to a GitHub Copilot CLI model ID.
+ * Supports both naming conventions (tier names and legacy aliases).
+ */
+export function resolveCopilotModel(tierOrModel: string): string {
+  const key = tierOrModel.toLowerCase();
+
+  if (key in COPILOT_MODEL_FLAGS) {
+    return COPILOT_MODEL_FLAGS[key as ModelTierName];
+  }
+
+  const LEGACY_ALIASES: Record<string, ModelTierName> = {
+    fast: 'haiku',
+    balanced: 'sonnet',
+    capable: 'opus',
+  };
+
+  if (key in LEGACY_ALIASES) {
+    return COPILOT_MODEL_FLAGS[LEGACY_ALIASES[key]];
+  }
+
+  return tierOrModel;
 }
 
 /**

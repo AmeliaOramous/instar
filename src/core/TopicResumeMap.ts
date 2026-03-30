@@ -14,11 +14,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import type { SessionRuntime } from './types.js';
 
 interface ResumeEntry {
   uuid: string;
   savedAt: string;
   sessionName: string;
+  runtime?: SessionRuntime;
 }
 
 interface ResumeMap {
@@ -106,7 +108,16 @@ export class TopicResumeMap {
    * contamination when multiple sessions are active — it always picks
    * the most recent JSONL file regardless of which session it belongs to.
    */
-  findUuidForSession(tmuxSession: string, claudeSessionId?: string): string | null {
+  findUuidForSession(
+    tmuxSession: string,
+    claudeSessionId?: string,
+    runtimeSessionId?: string,
+    runtime: SessionRuntime = 'claude-cli',
+  ): string | null {
+    if (runtime === 'codex-cli' && runtimeSessionId) {
+      return runtimeSessionId;
+    }
+
     if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
       return claudeSessionId;
     }
@@ -119,13 +130,14 @@ export class TopicResumeMap {
   /**
    * Persist a resume mapping before killing an idle session.
    */
-  save(topicId: number, uuid: string, sessionName: string): void {
+  save(topicId: number, uuid: string, sessionName: string, runtime: SessionRuntime = 'claude-cli'): void {
     const map = this.load();
 
     map[String(topicId)] = {
       uuid,
       savedAt: new Date().toISOString(),
       sessionName,
+      runtime,
     };
 
     // Prune old entries
@@ -158,8 +170,7 @@ export class TopicResumeMap {
       return null;
     }
 
-    // Verify the JSONL file still exists
-    if (!this.jsonlExists(entry.uuid)) {
+    if (!this.isResumeTargetAvailable(entry)) {
       return null;
     }
 
@@ -189,7 +200,12 @@ export class TopicResumeMap {
    *
    * @param topicSessions - Map of topicId → { sessionName, claudeSessionId? }
    */
-  refreshResumeMappings(topicSessions: Map<number, { sessionName: string; claudeSessionId?: string }>): void {
+  refreshResumeMappings(topicSessions: Map<number, {
+    sessionName: string;
+    claudeSessionId?: string;
+    runtimeSessionId?: string;
+    runtime?: SessionRuntime;
+  }>): void {
     try {
       if (!topicSessions || topicSessions.size === 0) return;
 
@@ -197,23 +213,38 @@ export class TopicResumeMap {
       let updated = 0;
 
       // Count how many sessions have known UUIDs vs unknown
-      const activeSessions: Array<{ topicId: number; sessionName: string; claudeSessionId?: string }> = [];
+      const activeSessions: Array<{
+        topicId: number;
+        sessionName: string;
+        claudeSessionId?: string;
+        runtimeSessionId?: string;
+        runtime?: SessionRuntime;
+      }> = [];
       for (const [topicId, info] of topicSessions) {
         // Verify the tmux session is actually alive
         const hasSession = spawnSync(this.tmuxPath, ['has-session', '-t', `=${info.sessionName}`]);
         if (hasSession.status !== 0) continue;
-        activeSessions.push({ topicId, sessionName: info.sessionName, claudeSessionId: info.claudeSessionId });
+        activeSessions.push({
+          topicId,
+          sessionName: info.sessionName,
+          claudeSessionId: info.claudeSessionId,
+          runtimeSessionId: info.runtimeSessionId,
+          runtime: info.runtime ?? 'claude-cli',
+        });
       }
 
       if (activeSessions.length === 0) return;
 
-      for (const { topicId, sessionName, claudeSessionId } of activeSessions) {
+      for (const { topicId, sessionName, claudeSessionId, runtimeSessionId, runtime } of activeSessions) {
         let uuid: string | null = null;
+        const resolvedRuntime = runtime ?? 'claude-cli';
 
-        if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
+        if (resolvedRuntime === 'codex-cli' && runtimeSessionId) {
+          uuid = runtimeSessionId;
+        } else if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
           // Authoritative: Claude Code reported its own session ID via hooks
           uuid = claudeSessionId;
-        } else if (activeSessions.length === 1) {
+        } else if (resolvedRuntime === 'claude-cli' && activeSessions.length === 1) {
           // Single session fallback: mtime-based is safe when there's no ambiguity
           uuid = this.findClaudeSessionUuid();
         }
@@ -231,6 +262,7 @@ export class TopicResumeMap {
             uuid,
             savedAt: new Date().toISOString(),
             sessionName,
+            runtime: resolvedRuntime,
           };
           updated++;
         }
@@ -265,6 +297,13 @@ export class TopicResumeMap {
       // Corrupted file — start fresh
     }
     return {};
+  }
+
+  private isResumeTargetAvailable(entry: ResumeEntry): boolean {
+    if ((entry.runtime ?? 'claude-cli') === 'codex-cli') {
+      return Boolean(entry.uuid);
+    }
+    return this.jsonlExists(entry.uuid);
   }
 
   /**

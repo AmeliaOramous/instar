@@ -18,6 +18,8 @@ import { PatternAnalyzer } from '../core/PatternAnalyzer.js';
 import { ReflectionConsolidator } from '../core/ReflectionConsolidator.js';
 import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
+import { CodexCliIntelligenceProvider } from '../core/CodexCliIntelligenceProvider.js';
+import { CopilotCliIntelligenceProvider } from '../core/CopilotCliIntelligenceProvider.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { DetectedPattern, PatternReport } from '../core/PatternAnalyzer.js';
 
@@ -342,15 +344,30 @@ interface ReflectRunOptions {
 
 /**
  * Resolve an IntelligenceProvider from the environment.
- * Prefers Anthropic API (faster) → Claude CLI fallback.
+ * Prefers cheaper local/subscription-backed options before paid APIs.
  */
-function resolveIntelligence(claudePath?: string): IntelligenceProvider | null {
-  // Try Anthropic API first (explicit opt-in via env)
-  const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-  if (apiProvider) return apiProvider;
+function resolveIntelligence(paths: {
+  runtime?: 'claude-cli' | 'codex-cli' | 'copilot-cli';
+  claudePath?: string;
+  codexPath?: string;
+  copilotPath?: string;
+  cwd: string;
+}): IntelligenceProvider | null {
+  if (paths.runtime === 'copilot-cli' && paths.copilotPath) {
+    return new CopilotCliIntelligenceProvider(paths.copilotPath, paths.cwd);
+  }
 
-  // Fall back to Claude CLI
-  if (claudePath) return new ClaudeCliIntelligenceProvider(claudePath);
+  if (paths.runtime === 'codex-cli' && paths.codexPath) {
+    return new CodexCliIntelligenceProvider(paths.codexPath, paths.cwd);
+  }
+
+  if (paths.runtime === 'claude-cli' && paths.claudePath) {
+    return new ClaudeCliIntelligenceProvider(paths.claudePath);
+  }
+
+  if (paths.runtime === 'claude-cli') {
+    return AnthropicIntelligenceProvider.fromEnv();
+  }
 
   return null;
 }
@@ -359,11 +376,17 @@ export async function runReflection(slug: string | undefined, opts: ReflectRunOp
   const config = await loadConfig(opts.dir);
 
   // Resolve intelligence provider
-  const intelligence = resolveIntelligence(config.sessions?.claudePath);
+  const intelligence = resolveIntelligence({
+    runtime: config.sessions?.runtime,
+    claudePath: config.sessions?.claudePath,
+    codexPath: config.sessions?.codexPath,
+    copilotPath: config.sessions?.copilotPath,
+    cwd: config.sessions?.projectDir ?? config.stateDir,
+  });
   if (!intelligence) {
     console.log();
     console.log(pc.red('No LLM provider available for reflection.'));
-    console.log(pc.dim('  Set ANTHROPIC_API_KEY or ensure Claude CLI is installed.'));
+    console.log(pc.dim('  Ensure the selected runtime CLI is installed and configured.'));
     return;
   }
 

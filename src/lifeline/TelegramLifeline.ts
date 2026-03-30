@@ -26,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { loadConfig, ensureStateDir, detectTmuxPath } from '../core/Config.js';
+import { resolveCodexModel, resolveCopilotModel } from '../core/models.js';
 import { registerAgent, unregisterAgent, startHeartbeat } from '../core/AgentRegistry.js';
 // setup.ts uses @inquirer/prompts which requires Node 20.12+
 // Dynamic import to avoid breaking the lifeline on older Node versions
@@ -1334,22 +1335,6 @@ export class TelegramLifeline {
     const promptPath = path.join(stateDir, 'doctor-prompt.txt');
     fs.writeFileSync(promptPath, diagnosticPrompt, 'utf-8');
 
-    // Determine permission flag
-    const claudePath = (this.projectConfig as unknown as Record<string, unknown>).claudePath as string || 'claude';
-    const useAllowedTools = await this.supportsAllowedTools(claudePath);
-
-    // Build claude command with prompt piped via stdin
-    const permFlag = useAllowedTools
-      ? '--allowedTools Read,Write,Edit,Glob,Grep,Bash'
-      : '--dangerously-skip-permissions';
-
-    if (!useAllowedTools) {
-      console.warn('[Lifeline] --allowedTools not available, falling back to --dangerously-skip-permissions');
-    }
-
-    // Use shell to pipe the prompt file to claude via --message flag
-    const shellCmd = `cat "${promptPath}" | ${claudePath} ${permFlag} --message -`;
-
     const tmuxArgs = [
       'new-session', '-d',
       '-s', sessionName,
@@ -1362,8 +1347,44 @@ export class TelegramLifeline {
       '-e', 'DATABASE_URL_PROD=',
       '-e', 'DATABASE_URL_DEV=',
       '-e', 'DATABASE_URL_TEST=',
-      '/bin/sh', '-c', shellCmd,
     ];
+
+    const runtime = this.projectConfig.sessions.runtime ?? 'claude-cli';
+    if (runtime === 'codex-cli') {
+      const codexPath = this.projectConfig.sessions.codexPath || 'codex';
+      const model = this.projectConfig.sessions.codexModelMap?.sonnet ?? resolveCodexModel('balanced');
+      tmuxArgs.push(
+        codexPath,
+        'exec',
+        '--color', 'never',
+        '--skip-git-repo-check',
+        '-C', this.projectConfig.projectDir,
+        '-s', this.projectConfig.sessions.codexSandboxMode ?? 'danger-full-access',
+        '-m', model,
+        diagnosticPrompt,
+      );
+    } else if (runtime === 'copilot-cli') {
+      const copilotPath = this.projectConfig.sessions.copilotPath || 'copilot';
+      const model = this.projectConfig.sessions.copilotModelMap?.sonnet ?? resolveCopilotModel('balanced');
+      tmuxArgs.push(
+        copilotPath,
+        '--model', model,
+        '--prompt', diagnosticPrompt,
+      );
+    } else {
+      const claudePath = this.projectConfig.sessions.claudePath || 'claude';
+      const useAllowedTools = await this.supportsAllowedTools(claudePath);
+      const permFlag = useAllowedTools
+        ? '--allowedTools Read,Write,Edit,Glob,Grep,Bash'
+        : '--dangerously-skip-permissions';
+
+      if (!useAllowedTools) {
+        console.warn('[Lifeline] --allowedTools not available, falling back to --dangerously-skip-permissions');
+      }
+
+      const shellCmd = `cat "${promptPath}" | ${claudePath} ${permFlag} --message -`;
+      tmuxArgs.push('/bin/sh', '-c', shellCmd);
+    }
 
     await new Promise<void>((resolve, reject) => {
       execFile(tmuxPath, tmuxArgs, { encoding: 'utf-8' }, (err) => {

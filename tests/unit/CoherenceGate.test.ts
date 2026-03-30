@@ -405,9 +405,8 @@ describe('CoherenceGate', () => {
 
       // Simulate user sending new message (advance transcript)
       fs.appendFileSync(transcriptPath, '{"type":"user_message"}\n');
-
-      // Tiny delay to ensure mtime changes
-      await new Promise(r => setTimeout(r, 50));
+      const now = Date.now();
+      fs.utimesSync(transcriptPath, new Date(now + 1_000), new Date(now + 1_000));
 
       // Second: retry but transcript has advanced
       const result = await gate.evaluate({

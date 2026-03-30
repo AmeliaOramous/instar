@@ -223,5 +223,4 @@ export interface PendingPrompt {
   channelId: string;
   messageTs: string;
   createdAt: number;
-  sessionName?: string;
 }
