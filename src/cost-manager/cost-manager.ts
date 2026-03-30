@@ -25,6 +25,10 @@ export interface CostManagerConfig {
   enableExploration?: boolean;
 }
 
+type SelectModelSignals = Partial<UpgradeSignals> & {
+  jobId?: string;
+};
+
 /**
  * CostManager tracks and manages model costs
  */
@@ -46,7 +50,7 @@ export class CostManager {
   /**
    * Select the appropriate model tier for a job
    */
-  selectModel(signals: Partial<UpgradeSignals>): string {
+  selectModel(signals: SelectModelSignals): string {
     const fullSignals: UpgradeSignals = {
       failureCount: signals.failureCount ?? (this.failureLog.get(signals.jobId ?? "") ?? 0),
       toolUseCount: signals.toolUseCount ?? 0,
