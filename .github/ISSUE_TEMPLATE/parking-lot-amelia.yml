@@ -1,0 +1,27 @@
+name: Parking Lot (Amelia)
+description: Capture a new idea for Amelia's parking lot
+labels: ["parking-lot", "owner:amelia"]
+title: "[PL][Amelia] <short title>"
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences capturing the idea
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation / Why now
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options: [P1, P2, P3]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / Links
