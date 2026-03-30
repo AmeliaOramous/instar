@@ -442,7 +442,10 @@ export class JobScheduler {
   }
 
   private getRunningSessionsSnapshot() {
-    return this.sessionManager.getCachedRunningSessions().sessions;
+    if (typeof this.sessionManager.getCachedRunningSessions === 'function') {
+      return this.sessionManager.getCachedRunningSessions().sessions;
+    }
+    return this.sessionManager.listRunningSessions();
   }
 
   private enqueue(slug: string, reason: string): void {

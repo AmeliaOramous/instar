@@ -578,8 +578,9 @@ export class SessionManager extends EventEmitter {
     maxDurationMinutes?: number;
   }): Promise<Session> {
     this.assertPersistentRuntimeImplemented();
-    const cached = this.getCachedRunningSessions();
-    const runningSessions = cached.count > 0 ? cached.sessions : this.listRunningSessions();
+    // Session spawning is not latency-sensitive, so refresh against tmux instead
+    // of trusting a potentially stale cache from a prior monitor tick.
+    const runningSessions = this.listRunningSessions();
     if (runningSessions.length >= this.config.maxSessions) {
       throw new Error(
         `Max sessions (${this.config.maxSessions}) reached. ` +
