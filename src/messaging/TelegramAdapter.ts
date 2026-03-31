@@ -11,8 +11,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MessagingAdapter, Message, OutgoingMessage, UserChannel, IntelligenceProvider } from '../core/types.js';
+import type { MessagingAdapter, Message, OutgoingMessage, UserChannel, IntelligenceProvider, SessionRuntime } from '../core/types.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { getRuntimeQuotaRecoveryHint } from '../core/runtimeLabels.js';
 import { NotificationBatcher, NotificationTier } from './NotificationBatcher.js';
 import type { ContentValidationConfig } from './TopicContentValidator.js';
 import { validateTopicContent, getTopicPurpose, classifyContent } from './TopicContentValidator.js';
@@ -48,6 +49,8 @@ export interface TelegramConfig {
   dashboardTopicId?: number;
   /** Dashboard PIN (for including in broadcast messages). */
   dashboardPin?: string;
+  /** Active agent runtime so quota alerts can use the correct backend label. */
+  runtime?: SessionRuntime;
   /** Content validation configuration — validates outbound messages against topic purpose */
   contentValidation?: ContentValidationConfig;
   /** Prompt Gate configuration for Telegram relay */
@@ -609,7 +612,7 @@ export class TelegramAdapter implements MessagingAdapter {
         await this.sendToTopic(topicId, 'Account switching not available.').catch(() => {});
       }
       return true;
-    }, { description: 'Switch active Claude account' });
+    }, { description: this.config.runtime === 'claude-cli' ? 'Switch active Claude account' : 'Switch active account' });
 
     this.sharedCommandRouter.register(['quota', 'q'], async (ctx) => {
       const topicId = parseInt(ctx.channelId, 10);
@@ -622,7 +625,7 @@ export class TelegramAdapter implements MessagingAdapter {
         await this.sendToTopic(topicId, 'Quota status not available.').catch(() => {});
       }
       return true;
-    }, { description: 'Show multi-account quota summary' });
+    }, { description: this.config.runtime === 'claude-cli' ? 'Show multi-account quota summary' : 'Show quota summary' });
 
     this.sharedCommandRouter.register('login', async (ctx) => {
       const topicId = parseInt(ctx.channelId, 10);
@@ -1880,7 +1883,7 @@ export class TelegramAdapter implements MessagingAdapter {
               pending.topicId,
               `\ud83d\udd34 Session hit quota limit \u2014 "${pending.sessionName}" can't respond.\n\n` +
               `${classification.detail}\n\n` +
-              `Use /quota to check accounts, /switch-account to switch, or /login to authenticate a new account.`,
+              `${getRuntimeQuotaRecoveryHint(this.config.runtime)}`,
             ).catch(err => {
               console.error(`[telegram] Quota stall alert failed: ${err}`);
             });
@@ -2048,7 +2051,7 @@ export class TelegramAdapter implements MessagingAdapter {
               topicId,
               `\ud83d\udd34 Session hit quota limit \u2014 "${event.sessionName}" can't respond.\n\n` +
               `${classification.detail}\n\n` +
-              `Use /quota to check accounts, /switch-account to switch, or /login to authenticate a new account.`,
+              `${getRuntimeQuotaRecoveryHint(this.config.runtime)}`,
             ).catch(err => console.error(`[telegram] Quota stall alert failed: ${err}`));
           }
         } catch { /* Classification failed — fall through */ }

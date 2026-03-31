@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
-import type { InstarConfig } from '../core/types.js';
+import type { InstarConfig, SessionRuntime } from '../core/types.js';
 import { rateLimiter, signViewPath } from './middleware.js';
 import type { WriteOperation, WriteToken } from '../core/StateWriteAuthority.js';
 import { validateWriteToken, canPerformOperation } from '../core/StateWriteAuthority.js';
@@ -59,6 +59,7 @@ import type { CommitmentTracker } from '../monitoring/CommitmentTracker.js';
 import type { SemanticMemory } from '../memory/SemanticMemory.js';
 import type { SessionActivitySentinel } from '../monitoring/SessionActivitySentinel.js';
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
+import { getQuotaCapabilityDescription } from '../core/runtimeLabels.js';
 import type { MessageRouter } from '../messaging/MessageRouter.js';
 import type { SessionSummarySentinel } from '../messaging/SessionSummarySentinel.js';
 import type { SpawnRequestManager } from '../messaging/SpawnRequestManager.js';
@@ -158,6 +159,49 @@ export interface RouteContext {
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]{1,200}$/;
 const JOB_SLUG_RE = /^[a-zA-Z0-9_-]{1,100}$/;
 const VALID_SORTS = ['significance', 'recent', 'name'] as const;
+
+type ResumeAwareSession = {
+  claudeSessionId?: string;
+  runtimeSessionId?: string;
+  runtime?: SessionRuntime;
+};
+
+function resolveResumeCandidate(
+  ctx: Pick<RouteContext, 'sessionManager' | 'topicResumeMap'>,
+  sessionName: string,
+  session?: ResumeAwareSession,
+  options?: { allowClaudeMtimeFallback?: boolean },
+): { uuid: string | null; runtime: SessionRuntime; source: 'hook' | 'worker' | 'mtime' | 'none' } {
+  if (!ctx.topicResumeMap) {
+    return { uuid: null, runtime: 'claude-cli', source: 'none' };
+  }
+
+  const runtimeSessionId = session?.runtimeSessionId ?? ctx.sessionManager.getRuntimeSessionIdForTmuxSession(sessionName);
+  const runtime = session?.runtime ?? (runtimeSessionId ? 'codex-cli' : 'claude-cli');
+  const uuid = ctx.topicResumeMap.findUuidForSession(
+    sessionName,
+    session?.claudeSessionId,
+    runtimeSessionId,
+    runtime,
+  );
+
+  if (uuid) {
+    return {
+      uuid,
+      runtime,
+      source: runtime === 'codex-cli' ? 'worker' : 'hook',
+    };
+  }
+
+  if (options?.allowClaudeMtimeFallback && runtime === 'claude-cli') {
+    const fallbackUuid = ctx.topicResumeMap.findClaudeSessionUuid();
+    if (fallbackUuid) {
+      return { uuid: fallbackUuid, runtime, source: 'mtime' };
+    }
+  }
+
+  return { uuid: null, runtime, source: 'none' };
+}
 
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
@@ -3308,6 +3352,7 @@ export function createRoutes(ctx: RouteContext): Router {
 
       // Notify onMessageLogged that the agent responded (so PresenceProxy cancels standby)
       if (ctx.slack.onMessageLogged) {
+        console.log(`[slack-reply] Firing onMessageLogged(fromUser:false) for channel ${channelId}`);
         ctx.slack.onMessageLogged({
           messageId: ts,
           channelId,
@@ -3317,6 +3362,8 @@ export function createRoutes(ctx: RouteContext): Router {
           sessionName: null,
           platform: 'slack',
         });
+      } else {
+        console.warn(`[slack-reply] onMessageLogged not wired — standby won't cancel`);
       }
 
       res.json({ ok: true, topicId: channelId, ts });
@@ -4763,10 +4810,15 @@ export function createRoutes(ctx: RouteContext): Router {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
+                const { uuid, runtime, source } = resolveResumeCandidate(
+                  ctx,
+                  newSessionName,
+                  session,
+                  { allowClaudeMtimeFallback: true },
+                );
                 if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName, runtime);
+                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${source})`);
                 }
               } catch (err) {
                 console.error(`[secret-drop] Proactive UUID save failed:`, err);
@@ -5080,10 +5132,15 @@ export function createRoutes(ctx: RouteContext): Router {
               try {
                 const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
                 const session = sessions.find(s => s.tmuxSession === newSessionName);
-                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
+                const { uuid, runtime, source } = resolveResumeCandidate(
+                  ctx,
+                  newSessionName,
+                  session,
+                  { allowClaudeMtimeFallback: true },
+                );
                 if (uuid) {
-                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
+                  ctx.topicResumeMap!.save(topicId, uuid, newSessionName, runtime);
+                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${source})`);
                 }
               } catch (err) {
                 console.error(`[telegram-forward] Proactive UUID save failed:`, err);
@@ -5105,45 +5162,6 @@ export function createRoutes(ctx: RouteContext): Router {
   // ── Plan Prompt Relay (from hook) ─────────────────────────────
   // Receives plan mode entry events from the PreToolUse hook on EnterPlanMode.
   // Relays the plan to Telegram for user approval via inline keyboard.
-  // The hook polls /hooks/plan-prompt/status until the user responds.
-
-  // Track pending plan prompts so the hook can poll for resolution.
-  // Key: promptId, Value: { resolved, key, sessionName, createdAt }
-  const pendingPlanPrompts = new Map<string, {
-    resolved: boolean;
-    key?: string;
-    sessionName: string;
-    createdAt: number;
-  }>();
-
-  // Evict stale entries every 5 minutes (prompts older than 10 min)
-  setInterval(() => {
-    const cutoff = Date.now() - 10 * 60 * 1000;
-    for (const [id, entry] of pendingPlanPrompts) {
-      if (entry.createdAt < cutoff) pendingPlanPrompts.delete(id);
-    }
-  }, 5 * 60 * 1000);
-
-  // Wire resolution: when a prompt callback fires, mark the plan prompt as resolved.
-  // This is called from the onPromptResponse path in TelegramAdapter.
-  const resolvePlanPrompt = (sessionName: string, key: string) => {
-    for (const [id, entry] of pendingPlanPrompts) {
-      if (entry.sessionName === sessionName && !entry.resolved) {
-        entry.resolved = true;
-        entry.key = key;
-        console.log(`[PlanRelay] Prompt ${id} resolved: session="${sessionName}" key="${key}"`);
-        break;
-      }
-    }
-  };
-  // Internal endpoint — called by onPromptResponse to mark plan prompts resolved
-  router.post('/hooks/plan-prompt/resolve', (req, res) => {
-    const { sessionName, key } = req.body;
-    if (sessionName && key) {
-      resolvePlanPrompt(sessionName, key);
-    }
-    res.json({ ok: true });
-  });
 
   router.post('/hooks/plan-prompt', async (req, res) => {
     const { event, session_id, tool_input, instar_sid } = req.body;
@@ -5194,9 +5212,6 @@ export function createRoutes(ctx: RouteContext): Router {
 
     // Build a DetectedPrompt and relay it
     try {
-      const promptId = crypto.randomUUID().slice(0, 8);
-      const sessionName = tmuxSession || session?.tmuxSession || 'unknown';
-
       const prompt = {
         type: 'plan' as const,
         raw: '',
@@ -5206,41 +5221,18 @@ export function createRoutes(ctx: RouteContext): Router {
           { key: '2', label: 'Yes, manually approve edits' },
           { key: '3', label: 'Tell Claude what to change' },
         ],
-        sessionName,
+        sessionName: tmuxSession || session?.tmuxSession || 'unknown',
         detectedAt: Date.now(),
-        id: promptId,
+        id: crypto.randomUUID().slice(0, 8),
       };
 
-      // Track the pending prompt so the hook can poll for resolution
-      pendingPlanPrompts.set(promptId, {
-        resolved: false,
-        sessionName,
-        createdAt: Date.now(),
-      });
-
       await ctx.telegram.relayPrompt(topicId, prompt);
-      console.log(`[PlanRelay] Relayed plan prompt ${promptId} to topic ${topicId} for session ${sessionName}`);
-      res.json({ ok: true, topicId, promptId });
+      console.log(`[PlanRelay] Relayed plan prompt to topic ${topicId} for session ${tmuxSession || session?.tmuxSession}`);
+      res.json({ ok: true, topicId });
     } catch (err) {
       console.error(`[PlanRelay] Failed:`, err instanceof Error ? err.message : err);
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
-  });
-
-  // Status endpoint — the hook polls this to know when the user has responded
-  router.get('/hooks/plan-prompt/status', (req, res) => {
-    const promptId = req.query.id as string;
-    if (!promptId) {
-      res.status(400).json({ error: 'missing id parameter' });
-      return;
-    }
-    const entry = pendingPlanPrompts.get(promptId);
-    if (!entry) {
-      // Unknown prompt — tell hook to stop polling
-      res.json({ resolved: true, key: '1', reason: 'unknown prompt' });
-      return;
-    }
-    res.json({ resolved: entry.resolved, key: entry.key });
   });
 
   // ── Telegram Callback Query Forwarding (from Lifeline) ────────
@@ -6357,7 +6349,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'quota',
         label: 'Quota Management',
-        description: 'Tracks Claude API token usage in real-time. Sends warnings when approaching limits, enforces quotas, and auto-switches between accounts if configured.',
+        description: getQuotaCapabilityDescription(ctx.config.sessions.runtime),
         processes: [
           { name: 'QuotaTracker', subsystem: ctx.quotaTracker, statusFn: () => ctx.quotaTracker?.getState() },
           { name: 'QuotaManager', subsystem: ctx.quotaManager },

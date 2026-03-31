@@ -173,6 +173,19 @@ describe('Startup session purge (purgeDeadSessions)', () => {
     expect(state.saveSession).not.toHaveBeenCalled();
   });
 
+  it('warms the cached running-session snapshot during purge', async () => {
+    const sessions = [makeSession('s1', 'alive-session')];
+    const state = createMockState(sessions);
+    const config = createSessionManagerConfig({ tmuxPath: '/usr/bin/true' });
+    const sm = new SessionManager(config, state);
+
+    await sm.purgeDeadSessions();
+
+    const cached = sm.getCachedRunningSessions();
+    expect(cached.count).toBe(1);
+    expect(cached.sessions[0].tmuxSession).toBe('alive-session');
+  });
+
   it('only processes sessions with status "running"', async () => {
     const sessions = [
       makeSession('s1', 'completed-session', 'completed'),
@@ -295,5 +308,26 @@ describe('CoherenceMonitor suppresses known-pending updates', () => {
     expect(results).toHaveLength(1);
     expect(results[0].passed).toBe(true);
     expect(results[0].message).toContain('matches disk');
+  });
+});
+
+describe('Source guards for health responsiveness', () => {
+  it('SessionManager monitorTick uses async terminal/process checks', () => {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), 'src/core/SessionManager.ts'),
+      'utf-8',
+    );
+    expect(source).toContain('await this.captureOutputAsync(session.tmuxSession, 5)');
+    expect(source).toContain('await this.hasActiveProcessesAsync(session.tmuxSession)');
+    expect(source).toContain('private async captureOutputAsync(');
+    expect(source).toContain('private async hasActiveProcessesAsync(');
+  });
+
+  it('JobScheduler uses cached session snapshots on the hot path', () => {
+    const source = fs.readFileSync(
+      path.join(process.cwd(), 'src/scheduler/JobScheduler.ts'),
+      'utf-8',
+    );
+    expect(source).toContain('this.sessionManager.getCachedRunningSessions().sessions');
   });
 });

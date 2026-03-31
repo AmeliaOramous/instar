@@ -1,9 +1,9 @@
 /**
  * PresenceProxy quota exhaustion detection — validates that when a session
- * hits Claude's API quota limit, the standby system reports the quota state
+ * hits a backend usage limit, the standby system reports the quota state
  * clearly instead of giving generic "agent is working" status updates.
  *
- * Root cause: When Claude's quota is exhausted, the terminal shows
+ * Root cause: When the backend quota is exhausted, the terminal shows
  * "You've hit your limit - resets 7pm (America/Los_Angeles)" but the
  * PresenceProxy's LLM-based status update would produce a generic
  * "agent is still working" message, misleading the user.
@@ -41,6 +41,13 @@ You've hit your limit - resets 7pm (America/Los_Angeles)
     expect(detectQuotaExhaustion('usage limit has been reached')).not.toBeNull();
     expect(detectQuotaExhaustion('quota exceeded for this period')).not.toBeNull();
     expect(detectQuotaExhaustion('rate limit exceeded')).not.toBeNull();
+  });
+
+  it('uses the configured runtime label for codex-backed agents', () => {
+    const snapshot = `You've hit your limit - resets 7pm (America/Chicago)`;
+    const result = detectQuotaExhaustion(snapshot, 'codex-cli');
+    expect(result).toContain('ChatGPT/Codex');
+    expect(result).not.toContain('Claude');
   });
 
   it('returns null for normal terminal output', () => {
@@ -85,7 +92,7 @@ describe('PresenceProxy source — quota integration', () => {
     );
 
     // Should call detectQuotaExhaustion in tier 1, 2, and 3
-    const matches = source.match(/detectQuotaExhaustion\(snapshot\)/g) || [];
+    const matches = source.match(/detectQuotaExhaustion\(snapshot(?:, [^)]+)?\)/g) || [];
     expect(matches.length).toBeGreaterThanOrEqual(3);
   });
 

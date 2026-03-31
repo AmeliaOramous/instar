@@ -94,7 +94,7 @@ describe('Session error nudge', () => {
     it('captures 30 lines of terminal output for error detection', () => {
       source = fs.readFileSync(SM_PATH, 'utf-8');
       // Should capture enough lines to see the error (not just the prompt)
-      expect(source).toContain('captureOutput(session.tmuxSession, 30)');
+      expect(source).toContain('captureOutputAsync(session.tmuxSession, 30)');
     });
   });
 });

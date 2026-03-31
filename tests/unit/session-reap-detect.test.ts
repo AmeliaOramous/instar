@@ -109,8 +109,8 @@ describe('Session reaping and detection', () => {
   describe('zombie cleanup — process-tree activity check', () => {
     it('checks for active processes before killing', () => {
       source = fs.readFileSync(SOURCE_PATH, 'utf-8');
-      // The zombie cleanup must use hasActiveProcesses to determine true idleness
-      expect(source).toContain('hasActiveProcesses(session.tmuxSession)');
+      // The zombie cleanup must use a process-tree activity check to determine true idleness
+      expect(source).toContain('hasActiveProcessesAsync(session.tmuxSession)');
     });
 
     it('only kills when both idle prompt AND no active processes', () => {
@@ -144,10 +144,12 @@ describe('Session reaping and detection', () => {
       const spawnSection = source.match(/async spawnSession[\s\S]*?this\.state\.saveSession\(session\)/);
       expect(spawnSection).toBeTruthy();
       const body = spawnSection![0];
-      // Should pass prompt as -p argument
-      expect(body).toContain("'-p'");
-      // Should use this.config.claudePath
-      expect(body).toContain('this.config.claudePath');
+      // Claude runtime should still pass prompt as -p argument
+      expect(body).toContain("claudeArgs.push('-p', options.prompt)");
+      // Runtime-specific path resolution should go through the guard helper
+      expect(body).toContain('const claudePath = this.requireClaudePath()');
+      // Codex runtime should also be supported in the same spawn path
+      expect(body).toContain("if (this.runtime() === 'codex-cli')");
       // Should unset CLAUDECODE to prevent nested Claude Code errors
       // Uses tmux -e flag: '-e', 'CLAUDECODE=' sets env var to empty (unset) in spawned session
       expect(body).toContain("'CLAUDECODE='");

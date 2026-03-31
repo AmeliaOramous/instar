@@ -1,7 +1,7 @@
 /**
  * Auto-detection and configuration management.
  *
- * Finds tmux, Claude CLI, and project structure automatically.
+ * Finds tmux, agent CLIs, and project structure automatically.
  * Adapted from dawn-server's config.ts — the battle-tested version.
  */
 
@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mergeConfigWithSecrets } from './SecretMigrator.js';
 import os from 'node:os';
-import type { InstarConfig, SessionManagerConfig, JobSchedulerConfig, FeedbackConfig, AgentType } from './types.js';
+import type { InstarConfig, SessionManagerConfig, JobSchedulerConfig, FeedbackConfig, AgentType, SessionRuntime } from './types.js';
 
 const DEFAULT_PORT = 4040;
 const DEFAULT_MAX_SESSIONS = 10;
@@ -139,12 +139,84 @@ export function detectClaudePath(): string | null {
   return null;
 }
 
+export function detectCodexPath(): string | null {
+  const candidates = [
+    '/usr/bin/codex',
+    '/usr/local/bin/codex',
+    '/opt/homebrew/bin/codex',
+  ];
+
+  try {
+    const npmPrefix = execFileSync('npm', ['config', 'get', 'prefix'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (npmPrefix) {
+      candidates.push(path.join(npmPrefix, 'bin', 'codex'));
+    }
+  } catch {
+    // @silent-fallback-ok — codex path detection loop
+  }
+
+  if (process.env.NVM_BIN) {
+    candidates.push(path.join(process.env.NVM_BIN, 'codex'));
+  }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const result = execFileSync('which', ['codex'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (result && fs.existsSync(result)) return result;
+  } catch {
+    // @silent-fallback-ok — codex path detection loop
+  }
+
+  return null;
+}
+
+export function detectCopilotPath(): string | null {
+  const candidates = [
+    '/usr/bin/copilot',
+    '/usr/local/bin/copilot',
+    '/opt/homebrew/bin/copilot',
+  ];
+
+  try {
+    const npmPrefix = execFileSync('npm', ['config', 'get', 'prefix'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (npmPrefix) {
+      candidates.push(path.join(npmPrefix, 'bin', 'copilot'));
+    }
+  } catch {
+    // @silent-fallback-ok — copilot path detection loop
+  }
+
+  if (process.env.NVM_BIN) {
+    candidates.push(path.join(process.env.NVM_BIN, 'copilot'));
+  }
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  try {
+    const result = execFileSync('which', ['copilot'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+    if (result && fs.existsSync(result)) return result;
+  } catch {
+    // @silent-fallback-ok — copilot path detection loop
+  }
+
+  return null;
+}
+
 export function detectProjectDir(startDir?: string): string {
   let dir = startDir || process.cwd();
 
-  // Walk up to find a directory with CLAUDE.md or .git
+  // Walk up to find a directory with AGENTS.md, CLAUDE.md, or .git
   while (dir !== path.dirname(dir)) {
-    if (fs.existsSync(path.join(dir, 'CLAUDE.md')) || fs.existsSync(path.join(dir, '.git'))) {
+    if (
+      fs.existsSync(path.join(dir, 'AGENTS.md'))
+      || fs.existsSync(path.join(dir, 'CLAUDE.md'))
+      || fs.existsSync(path.join(dir, '.git'))
+    ) {
       return dir;
     }
     dir = path.dirname(dir);
@@ -238,19 +310,32 @@ export function loadConfig(projectDir?: string): InstarConfig {
 
   const tmuxPath = detectTmuxPath();
   const claudePath = detectClaudePath();
+  const codexPath = detectCodexPath();
+  const copilotPath = detectCopilotPath();
+  const requestedRuntime = fileConfig.sessions?.runtime;
+  const runtime: SessionRuntime = requestedRuntime ?? 'claude-cli';
 
   if (!tmuxPath) {
     throw new Error('tmux not found. Install with: brew install tmux (macOS) or apt install tmux (Linux)');
   }
-  if (!claudePath) {
+  if (runtime === 'codex-cli' && !codexPath) {
+    throw new Error('Codex CLI not found. Install with: npm install -g @openai/codex');
+  }
+  if (runtime === 'copilot-cli' && !copilotPath) {
+    throw new Error('GitHub Copilot CLI not found. Install it first, then authenticate with `copilot auth login`.');
+  }
+  if (runtime === 'claude-cli' && !claudePath) {
     throw new Error('Claude CLI not found. Install from: https://docs.anthropic.com/en/docs/claude-code');
   }
 
   const projectName = fileConfig.projectName || path.basename(resolvedProjectDir);
 
   const sessions: SessionManagerConfig = {
+    runtime,
     tmuxPath,
-    claudePath,
+    claudePath: claudePath ?? undefined,
+    codexPath: codexPath ?? undefined,
+    copilotPath: copilotPath ?? undefined,
     projectDir: resolvedProjectDir,
     maxSessions: fileConfig.sessions?.maxSessions ?? DEFAULT_MAX_SESSIONS,
     protectedSessions: fileConfig.sessions?.protectedSessions || [`${projectName}-server`],
@@ -261,6 +346,9 @@ export function loadConfig(projectDir?: string): InstarConfig {
     ],
     authToken: fileConfig.authToken as string | undefined,
     port: (fileConfig.port as number | undefined) ?? 4040,
+    codexModelMap: fileConfig.sessions?.codexModelMap,
+    copilotModelMap: fileConfig.sessions?.copilotModelMap,
+    codexSandboxMode: fileConfig.sessions?.codexSandboxMode ?? 'danger-full-access',
   };
 
   const scheduler: JobSchedulerConfig = {
